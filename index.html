@@ -10,12 +10,12 @@
   <script src="https://unpkg.com/earcut@2.2.4/dist/earcut.min.js"></script>
 
   <style>
-    body { margin: 0; overflow: hidden; font-family: -apple-system, sans-serif; }
+    body { margin: 0; overflow: hidden; font-family: -apple-system, sans-serif; background: #111; }
     #ui {
       position: fixed; top: 0; left: 0; right: 0;
       background: rgba(0,0,0,0.78); color: white;
       padding: 8px 10px; z-index: 1000;
-      font-size: 12px; max-height: 40vh; overflow-y: auto;
+      font-size: 12px; max-height: 45vh; overflow-y: auto;
     }
     #ui h3 { margin: 0 0 4px 0; font-size: 13px; }
     #status { font-family: monospace; font-size: 10px; line-height: 1.4; }
@@ -26,26 +26,62 @@
     #file-input {
       position: fixed; top: 50%; left: 50%;
       transform: translate(-50%, -50%);
-      background: rgba(0,0,0,0.92); color: white;
-      padding: 18px; border-radius: 12px;
+      background: rgba(20,20,30,0.97); color: white;
+      padding: 20px; border-radius: 14px;
       z-index: 2000; text-align: center;
-      width: 86%; max-width: 340px;
+      width: 88%; max-width: 360px;
+      box-shadow: 0 10px 40px rgba(0,0,0,0.6);
     }
-    #file-input button, #file-input label {
-      display: block; width: 100%; padding: 11px; margin: 7px 0;
+    #file-input h3 { margin-top: 0; }
+    #file-input button {
+      display: block; width: 100%; padding: 12px; margin: 8px 0;
       background: #2563eb; color: white; border: none;
       border-radius: 8px; font-size: 14px; cursor: pointer;
-      box-sizing: border-box;
+      box-sizing: border-box; font-weight: 600;
+    }
+    #file-input button:disabled {
+      background: #444; color: #888; cursor: not-allowed;
+    }
+    #file-input button.start-btn {
+      background: #16a34a;
+      font-size: 16px;
+      padding: 14px;
+    }
+    #file-input button.start-btn:disabled { background: #444; }
+    #file-input .file-label {
+      display: block; width: 100%; padding: 14px; margin: 8px 0;
+      background: #1e40af; color: white; border: 2px dashed #60a5fa;
+      border-radius: 8px; font-size: 14px; cursor: pointer;
+      box-sizing: border-box; font-weight: 500;
+      transition: all 0.2s;
+    }
+    .file-label.has-file {
+      background: #166534 !important;
+      border-color: #4ade80 !important;
     }
     #file-input input[type=file] { display: none; }
     #file-input p { font-size: 11px; opacity: 0.75; margin: 6px 0; }
-    #file-input .opts {
+    #file-status {
+      font-size: 11px; padding: 8px;
+      background: rgba(0,0,0,0.4); border-radius: 6px;
+      margin: 8px 0; min-height: 18px;
+      font-family: monospace;
+    }
+    .opts {
       display: flex; gap: 8px; align-items: center;
       justify-content: space-between; margin: 10px 0; font-size: 12px;
+      padding: 8px; background: rgba(255,255,255,0.05); border-radius: 6px;
     }
-    #file-input .opts input[type=number] {
+    .opts input[type=number] {
       width: 80px; padding: 6px; border-radius: 6px;
       border: 1px solid #555; background: #222; color: white; font-size: 12px;
+    }
+    .opts label.checkbox {
+      display: flex; align-items: center; gap: 8px;
+      width: 100%; cursor: pointer; font-size: 13px;
+    }
+    .opts input[type=checkbox] {
+      width: 18px; height: 18px; cursor: pointer;
     }
 
     #legend {
@@ -56,29 +92,48 @@
       display: flex; flex-wrap: wrap; gap: 8px; justify-content: center;
     }
     .swatch { display: inline-block; width: 10px; height: 10px; margin-right: 4px; vertical-align: middle; border-radius: 2px; }
+
+    #log {
+      position: fixed; top: 50%; left: 10px; right: 10px;
+      transform: translateY(-50%);
+      background: rgba(0,0,0,0.85); color: #4ade80;
+      padding: 10px; border-radius: 8px;
+      font-family: monospace; font-size: 10px;
+      z-index: 1500; max-height: 60vh; overflow-y: auto;
+      display: none; white-space: pre-wrap;
+    }
   </style>
 </head>
 <body>
 
 <div id="file-input">
-  <h3 style="margin-top:0;color:white">AR OLS Surface Viewer</h3>
-  <p>โหลด OLS GeoJSON file</p>
-  <label for="geojson-file">📂 เลือกไฟล์ GeoJSON</label>
-  <input type="file" id="geojson-file" accept=".geojson,.json">
+  <h3>AR OLS Surface Viewer</h3>
+
+  <label for="geojson-file" class="file-label" id="file-label">
+    📂 แตะเพื่อเลือกไฟล์ GeoJSON
+  </label>
+  <input type="file" id="geojson-file" accept=".geojson,.json,application/json">
+
+  <div id="file-status">ยังไม่ได้เลือกไฟล์</div>
 
   <div class="opts">
     <span>รัศมีแสดงผล:</span>
-    <span><input type="number" id="render-radius" value="2000" min="200" max="20000" step="100"> m</span>
+    <span><input type="number" id="render-radius" value="5000" min="200" max="20000" step="500"> m</span>
   </div>
+
   <div class="opts">
-    <label style="display:flex;align-items:center;gap:6px;font-size:12px;width:100%;padding:0;background:none;margin:0;cursor:pointer">
-      <input type="checkbox" id="test-mode" style="display:inline;width:auto;margin:0"> 
-      <span>โหมดทดสอบ (วาง surface ที่ตำแหน่งฉัน)</span>
+    <label class="checkbox">
+      <input type="checkbox" id="test-mode" checked>
+      <span>โหมดทดสอบ (วาง surface ตรงตำแหน่งฉัน) ⭐</span>
     </label>
   </div>
 
-  <button onclick="loadFile()">▶ เริ่มดู AR</button>
+  <button class="start-btn" id="start-btn" onclick="startAR()" disabled>
+    ▶ เริ่มดู AR
+  </button>
+
   <p style="font-size:10px;opacity:0.6">อนุญาต Location + Camera + Motion sensors</p>
+  <p style="font-size:10px;opacity:0.5">ครั้งแรก แนะนำให้ติ๊ก "โหมดทดสอบ" ไว้</p>
 </div>
 
 <div id="ui" style="display:none">
@@ -93,6 +148,8 @@
   <div><span class="swatch" style="background:#f59e0b"></span>Take-off</div>
   <div><span class="swatch" style="background:#ec4899"></span>Transitional</div>
 </div>
+
+<div id="log"></div>
 
 <a-scene
   id="scene"
