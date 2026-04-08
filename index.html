@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>AR OLS Surface Viewer v3</title>
+  <title>AR OLS Surface Viewer v4</title>
 
   <script src="https://aframe.io/releases/1.4.0/aframe.min.js"></script>
   <script src="https://raw.githack.com/AR-js-org/AR.js/master/aframe/build/aframe-ar-nft.js"></script>
@@ -15,7 +15,7 @@
       position: fixed; top: 0; left: 0; right: 0;
       background: rgba(0,0,0,0.78); color: white;
       padding: 6px 10px; z-index: 1000;
-      font-size: 11px; max-height: 30vh; overflow-y: auto;
+      font-size: 11px; max-height: 25vh; overflow-y: auto;
     }
     #ui h3 { margin: 0 0 3px 0; font-size: 12px; }
     #status { font-family: monospace; font-size: 10px; line-height: 1.4; }
@@ -72,10 +72,9 @@
     }
     .opts input[type=checkbox] { width: 16px; height: 16px; }
 
-    /* Mini-map */
     #minimap-container {
       position: fixed;
-      bottom: 60px; right: 8px;
+      bottom: 50px; right: 8px;
       z-index: 1100;
       background: rgba(0,0,0,0.75);
       border: 2px solid #4ade80;
@@ -83,22 +82,7 @@
       padding: 4px;
       display: none;
     }
-    #minimap {
-      display: block;
-      border-radius: 50%;
-    }
-    #minimap-label {
-      position: fixed;
-      bottom: 230px; right: 8px;
-      color: #4ade80;
-      font-size: 9px;
-      font-family: monospace;
-      z-index: 1100;
-      background: rgba(0,0,0,0.7);
-      padding: 2px 6px;
-      border-radius: 4px;
-      display: none;
-    }
+    #minimap { display: block; border-radius: 50%; }
 
     #legend {
       position: fixed; bottom: 8px; left: 8px; right: 8px;
@@ -110,17 +94,16 @@
     .swatch { display: inline-block; width: 9px; height: 9px; margin-right: 3px; vertical-align: middle; border-radius: 2px; }
 
     #log {
-      position: fixed; top: 32%; left: 8px; right: 8px;
+      position: fixed; top: 28%; left: 8px; right: 8px;
       background: rgba(0,0,0,0.88); color: #4ade80;
       padding: 8px; border-radius: 8px;
       font-family: monospace; font-size: 9px;
-      z-index: 1500; max-height: 35vh; overflow-y: auto;
+      z-index: 1500; max-height: 40vh; overflow-y: auto;
       display: none; white-space: pre-wrap;
     }
 
-    /* Floating controls */
     #floating-ctrl {
-      position: fixed; right: 8px; top: 32%;
+      position: fixed; right: 8px; top: 28%;
       display: none;
       flex-direction: column; gap: 6px;
       z-index: 1100;
@@ -134,12 +117,14 @@
       font-size: 18px;
       box-shadow: 0 2px 6px rgba(0,0,0,0.5);
     }
+    /* Make sure A-Frame canvas is on top of bg but below UI */
+    .a-canvas { z-index: 500 !important; }
   </style>
 </head>
 <body>
 
 <div id="file-input">
-  <h3>AR OLS Viewer v3</h3>
+  <h3>AR OLS Viewer v4</h3>
 
   <label for="geojson-file" class="file-label" id="file-label">
     📂 แตะเพื่อเลือกไฟล์
@@ -154,28 +139,28 @@
   </div>
 
   <div class="opts">
-    <span>Surface สูง (เริ่ม):</span>
-    <span><input type="number" id="surface-offset" value="-30" min="-200" max="200" step="5"> m</span>
+    <span>Surface offset Y:</span>
+    <span><input type="number" id="surface-offset" value="0" min="-500" max="500" step="5"> m</span>
   </div>
 
   <div class="opts">
     <label class="checkbox">
       <input type="checkbox" id="auto-fit" checked>
-      <span>Auto-fit สูง (ดึงลงให้เห็น)</span>
+      <span>Auto-fit สูง (วาง surface ใกล้สายตา)</span>
     </label>
   </div>
 
   <div class="opts">
     <label class="checkbox">
       <input type="checkbox" id="debug-markers" checked>
-      <span>แสดง debug markers (N/S/E/W)</span>
+      <span>Debug markers (N/S/E/W)</span>
     </label>
   </div>
 
   <div class="opts">
     <label class="checkbox">
       <input type="checkbox" id="test-mode">
-      <span>โหมดทดสอบ (วาง centroid ที่ฉัน)</span>
+      <span>โหมดทดสอบ</span>
     </label>
   </div>
 
@@ -187,7 +172,7 @@
 </div>
 
 <div id="ui" style="display:none">
-  <h3>AR OLS</h3>
+  <h3>AR OLS v4</h3>
   <div id="status">เริ่มต้น...</div>
 </div>
 
@@ -199,15 +184,14 @@
   <div><span class="swatch" style="background:#ec4899"></span>Trans</div>
 </div>
 
-<div id="minimap-label">MAP (top-down)</div>
 <div id="minimap-container">
   <canvas id="minimap" width="180" height="180"></canvas>
 </div>
 
 <div id="floating-ctrl">
-  <button onclick="adjustHeight(-10)" title="ลดความสูง surface">⬇</button>
-  <button onclick="adjustHeight(10)" title="เพิ่มความสูง surface">⬆</button>
-  <button onclick="toggleLog()" title="แสดง log">🔍</button>
+  <button onclick="adjustHeight(-10)">⬇</button>
+  <button onclick="adjustHeight(10)">⬆</button>
+  <button onclick="toggleLog()">🔍</button>
 </div>
 
 <div id="log"></div>
@@ -220,12 +204,8 @@
   embedded
   style="display:none">
 
-  <a-entity id="anchor" gps-entity-place="latitude: 0; longitude: 0">
-    <a-entity id="surfaces"></a-entity>
-    <a-entity id="debug"></a-entity>
-  </a-entity>
-
-  <a-camera id="cam" gps-camera rotation-reader far="100000"></a-camera>
+  <a-camera id="cam" rotation-reader far="100000" position="0 1.6 0">
+  </a-camera>
 
 </a-scene>
 

@@ -1,9 +1,9 @@
 // =============================================
-// AR OLS Surface Viewer v3
-// - Mini-map (top-down)
-// - Debug markers (N/S/E/W cardinal directions)
-// - Manual height adjustment
-// - Auto-fit (pulls surfaces near eye level)
+// AR OLS Surface Viewer v4
+// FIX: bypass gps-entity-place — attach mesh
+// directly to A-Frame scene's THREE.js root,
+// then manually orient the world based on
+// device compass heading every frame.
 // =============================================
 
 let userPos = null;
@@ -13,13 +13,12 @@ let renderRadius = 8000;
 let testMode = false;
 let autoFit = true;
 let showDebugMarkers = true;
-let surfaceOffsetY = -30; // additional Y offset to apply to all surfaces
+let surfaceOffsetY = 0;
 let anchorPos = null;
 let scene = null;
-let surfacesEntity = null;
-let debugEntity = null;
-let surfaceMeshes = []; // for height adjustment
-let allFeaturesEnu = []; // {name, color, points: [{x,y,z}], minDist}
+let worldGroup = null; // THREE.Group containing everything
+let surfaceMeshes = [];
+let allFeaturesEnu = [];
 
 const SURFACE_COLORS = {
   'inner horizontal': 0x3b82f6,
@@ -68,13 +67,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
   fileInput.addEventListener('change', (e) => {
     const file = e.target.files[0];
-    if (!file) {
-      setFileStatus('ยังไม่ได้เลือกไฟล์');
-      startBtn.disabled = true;
-      return;
-    }
+    if (!file) { setFileStatus('ยังไม่ได้เลือกไฟล์'); startBtn.disabled = true; return; }
     setFileStatus(`โหลด: ${file.name}...`, '#fbbf24');
-
     const reader = new FileReader();
     reader.onload = (evt) => {
       try {
@@ -82,7 +76,6 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!surfaceData.features || !Array.isArray(surfaceData.features)) {
           throw new Error('ไม่ใช่ FeatureCollection');
         }
-        const numFeatures = surfaceData.features.length;
         let totalVerts = 0;
         function countV(c) {
           if (typeof c[0] === 'number') return 1;
@@ -90,7 +83,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         surfaceData.features.forEach(f => totalVerts += countV(f.geometry.coordinates));
         setFileStatus(
-          `✓ ${file.name}<br>${numFeatures} features, ${totalVerts} verts`,
+          `✓ ${file.name}<br>${surfaceData.features.length} features, ${totalVerts} verts`,
           '#4ade80'
         );
         fileLabel.classList.add('has-file');
@@ -113,26 +106,40 @@ function startAR() {
   showDebugMarkers = document.getElementById('debug-markers').checked;
   surfaceOffsetY = parseInt(document.getElementById('surface-offset').value) || 0;
 
-  showLog('=== Starting AR v3 ===');
-  showLog(`Mode: ${testMode ? 'TEST' : 'REAL GEO'}`);
-  showLog(`Radius: ${renderRadius} m, Offset Y: ${surfaceOffsetY} m`);
-  showLog(`Auto-fit: ${autoFit}, Debug markers: ${showDebugMarkers}`);
+  showLog('=== AR v4 (no gps-entity-place) ===');
+  showLog(`Mode: ${testMode ? 'TEST' : 'REAL'}, Radius: ${renderRadius}m`);
 
   document.getElementById('file-input').style.display = 'none';
   document.getElementById('ui').style.display = 'block';
   document.getElementById('legend').style.display = 'flex';
   document.getElementById('scene').style.display = 'block';
   document.getElementById('minimap-container').style.display = 'block';
-  document.getElementById('minimap-label').style.display = 'block';
   document.getElementById('floating-ctrl').style.display = 'flex';
 
   scene = document.querySelector('a-scene');
-  surfacesEntity = document.getElementById('surfaces');
-  debugEntity = document.getElementById('debug');
+
+  // Wait for scene to load before attaching to THREE.js
+  if (scene.hasLoaded) {
+    initWorldGroup();
+  } else {
+    scene.addEventListener('loaded', initWorldGroup);
+  }
 
   startStatusLoop();
   startMinimapLoop();
   waitForGPSThenRender();
+}
+
+function initWorldGroup() {
+  // Create a world group attached directly to scene's THREE root
+  worldGroup = new THREE.Group();
+  worldGroup.name = 'ols_world';
+  scene.object3D.add(worldGroup);
+  showLog('World group attached to scene.object3D');
+
+  // Add a soft ambient light for materials
+  const light = new THREE.AmbientLight(0xffffff, 1.0);
+  scene.object3D.add(light);
 }
 
 function waitForGPSThenRender() {
@@ -151,12 +158,23 @@ function waitForGPSThenRender() {
     if (!window._rendered) {
       showLog(`GPS: ${userPos.lat.toFixed(5)}, ${userPos.lon.toFixed(5)}`);
       showLog(`Acc: ±${userPos.acc.toFixed(0)}m, Alt: ${userPos.alt?.toFixed(0)}m`);
-      decideAnchorAndRender();
-      window._rendered = true;
+      // Wait for worldGroup to be ready
+      if (worldGroup) {
+        decideAnchorAndRender();
+        window._rendered = true;
+      } else {
+        const wait = setInterval(() => {
+          if (worldGroup) {
+            clearInterval(wait);
+            decideAnchorAndRender();
+            window._rendered = true;
+          }
+        }, 100);
+      }
       setTimeout(() => {
         const logEl = document.getElementById('log');
         if (logEl) logEl.style.display = 'none';
-      }, 8000);
+      }, 10000);
     }
   }, (err) => {
     showLog('GPS error: ' + err.message, true);
@@ -174,14 +192,8 @@ function decideAnchorAndRender() {
     }
   }
   anchorPos = { lat: userPos.lat, lon: userPos.lon };
+  showLog(`Anchor: ${anchorPos.lat.toFixed(5)}, ${anchorPos.lon.toFixed(5)}`);
 
-  const anchor = document.getElementById('anchor');
-  anchor.setAttribute('gps-entity-place',
-    `latitude: ${anchorPos.lat}; longitude: ${anchorPos.lon}`);
-
-  showLog(`Anchor set: ${anchorPos.lat.toFixed(5)}, ${anchorPos.lon.toFixed(5)}`);
-
-  // Pre-compute features in ENU + auto-fit
   precomputeFeatures();
   if (autoFit) computeAutoFit();
   renderSurfaces();
@@ -206,6 +218,8 @@ function shiftAllCoords(geojson, dLat, dLon) {
   geojson.features.forEach(f => walk(f.geometry.coordinates));
 }
 
+// ENU coordinates (East, Up, -North) — suitable for THREE.js
+// At Y=0 = anchor altitude (we'll add surfaceOffsetY)
 function llToEnu(lat, lon, alt) {
   const R = 6378137;
   const dLat = (lat - anchorPos.lat) * Math.PI / 180;
@@ -213,10 +227,8 @@ function llToEnu(lat, lon, alt) {
   const refLatRad = anchorPos.lat * Math.PI / 180;
   const east  = dLon * R * Math.cos(refLatRad);
   const north = dLat * R;
-  // Use surface absolute MSL altitude — ignore GPS altitude (too unreliable)
-  // We'll subtract a "ground reference" later via surfaceOffsetY
-  const up = (alt || 0);
-  return { x: east, y: up, z: -north };
+  // alt is absolute MSL; we'll handle the offset later
+  return { x: east, y: (alt || 0), z: -north };
 }
 
 function horizDistFromAnchor(lat, lon) {
@@ -240,33 +252,21 @@ function precomputeFeatures() {
     else if (geom.type === 'MultiPolygon') polygons = geom.coordinates;
     else return;
 
-    polygons.forEach((rings, polyIdx) => {
-      const enuPoints = [];
+    polygons.forEach((rings) => {
       let minDist = Infinity;
-      let minLat = Infinity, maxLat = -Infinity;
-      let minLon = Infinity, maxLon = -Infinity;
       rings.forEach(ring => {
-        ring.forEach(([lon, lat, alt]) => {
+        ring.forEach(([lon, lat]) => {
           const d = horizDistFromAnchor(lat, lon);
           if (d < minDist) minDist = d;
-          if (lat < minLat) minLat = lat;
-          if (lat > maxLat) maxLat = lat;
-          if (lon < minLon) minLon = lon;
-          if (lon > maxLon) maxLon = lon;
         });
       });
-      allFeaturesEnu.push({
-        name, color, rings, polyIdx, minDist,
-        bbox: { minLat, maxLat, minLon, maxLon }
-      });
+      allFeaturesEnu.push({ name, color, rings, minDist });
     });
   });
-  showLog(`Pre-computed ${allFeaturesEnu.length} polygons`);
+  showLog(`Pre-computed ${allFeaturesEnu.length} polys`);
 }
 
 function computeAutoFit() {
-  // Find min absolute altitude of all rendered (in-range) surfaces
-  // Then set surfaceOffsetY so that lowest surface ends up at ~5m above eye level
   let minAlt = Infinity;
   allFeaturesEnu.forEach(p => {
     if (p.minDist > renderRadius) return;
@@ -276,27 +276,24 @@ function computeAutoFit() {
       });
     });
   });
-  if (minAlt === Infinity) {
-    showLog('Auto-fit: no in-range surfaces');
-    return;
-  }
-  // Target: lowest point at ~5 m above eye → user eye at Y=0
-  // surface render Y = alt + surfaceOffsetY, want = 5
-  // → surfaceOffsetY = 5 - alt
+  if (minAlt === Infinity) return;
+  // Target: lowest visible surface point at Y = +5 m above eye (eye at Y=0)
+  // Mesh world Y = enu.y + surfaceOffsetY = alt + offset
+  // Want = 5 → offset = 5 - alt
   surfaceOffsetY = 5 - minAlt;
-  showLog(`Auto-fit: minAlt=${minAlt.toFixed(1)}, offset=${surfaceOffsetY.toFixed(1)}`);
+  showLog(`Auto-fit: minAlt=${minAlt.toFixed(0)}, offset=${surfaceOffsetY.toFixed(0)}`);
   document.getElementById('surface-offset').value = Math.round(surfaceOffsetY);
 }
 
 function renderSurfaces() {
-  if (!window.THREE || !scene || !surfacesEntity || !surfacesEntity.object3D) {
+  if (!worldGroup) {
+    showLog('No worldGroup yet, retry...');
     setTimeout(renderSurfaces, 200);
     return;
   }
-  // Clear previous
-  while (surfacesEntity.object3D.children.length > 0) {
-    surfacesEntity.object3D.remove(surfacesEntity.object3D.children[0]);
-  }
+
+  // Clear previous surface meshes (keep debug markers)
+  surfaceMeshes.forEach(m => worldGroup.remove(m));
   surfaceMeshes = [];
 
   let polyCount = 0;
@@ -306,19 +303,19 @@ function renderSurfaces() {
   allFeaturesEnu.forEach(p => {
     if (p.minDist > renderRadius) {
       skipped++;
-      showLog(`✗ ${p.name}: ${p.minDist.toFixed(0)}m`);
       return;
     }
     const mesh = createPolygonMesh(p.rings, p.color, p.name);
     if (mesh) {
-      surfacesEntity.object3D.add(mesh);
+      worldGroup.add(mesh);
       surfaceMeshes.push(mesh);
       polyCount++;
       totalTris += mesh.userData.triCount || 0;
     }
   });
 
-  showLog(`✓ Rendered: ${polyCount} polys, ${totalTris} tris, skipped ${skipped}`);
+  showLog(`✓ Rendered ${polyCount} polys, ${totalTris} tris in worldGroup`);
+  showLog(`worldGroup.children: ${worldGroup.children.length}`);
   setStatus(`${polyCount} polys, ${totalTris} tris`);
 }
 
@@ -340,7 +337,6 @@ function createPolygonMesh(rings, color, name) {
       const [lon, lat, alt] = ring[i];
       const enu = llToEnu(lat, lon, alt);
       flat2D.push(enu.x, enu.z);
-      // Apply surfaceOffsetY here
       pos3D.push(enu.x, enu.y + surfaceOffsetY, enu.z);
       vIdx++;
     }
@@ -354,101 +350,90 @@ function createPolygonMesh(rings, color, name) {
   geom.setIndex(tris);
   geom.computeVertexNormals();
 
+  // Use MeshBasicMaterial — doesn't need lights
   const mat = new THREE.MeshBasicMaterial({
-    color: color, transparent: true, opacity: 0.45,
+    color: color, transparent: true, opacity: 0.4,
     side: THREE.DoubleSide, depthWrite: false
   });
   const mesh = new THREE.Mesh(geom, mat);
+  mesh.name = name;
   mesh.userData = { name, triCount: tris.length / 3, originalPos: pos3D.slice() };
 
-  // Wireframe
+  // Wireframe child
   const wireMat = new THREE.MeshBasicMaterial({
-    color: color, wireframe: true, transparent: true, opacity: 0.85
+    color: color, wireframe: true, transparent: true, opacity: 0.9
   });
-  mesh.add(new THREE.Mesh(geom, wireMat));
+  const wireMesh = new THREE.Mesh(geom, wireMat);
+  mesh.add(wireMesh);
 
-  // Outline
+  // Outline of outer ring
   const outPts = [];
   outer.forEach(([lon, lat, alt]) => {
     const enu = llToEnu(lat, lon, alt);
     outPts.push(new THREE.Vector3(enu.x, enu.y + surfaceOffsetY, enu.z));
   });
   const lineGeom = new THREE.BufferGeometry().setFromPoints(outPts);
-  const lineMat = new THREE.LineBasicMaterial({ color: color, linewidth: 4 });
-  mesh.add(new THREE.Line(lineGeom, lineMat));
+  const lineMat = new THREE.LineBasicMaterial({ color: color });
+  const line = new THREE.Line(lineGeom, lineMat);
+  line.userData = { isOutline: true, originalPos: outPts.map(p => [p.x, p.y, p.z]) };
+  mesh.add(line);
 
-  showLog(`✓ ${name}: ${tris.length/3} tris`);
   return mesh;
 }
 
-// ----- Debug markers: cardinal direction pillars -----
+// ----- Debug markers -----
 function renderDebugMarkers() {
-  if (!debugEntity || !debugEntity.object3D) return;
-  while (debugEntity.object3D.children.length > 0) {
-    debugEntity.object3D.remove(debugEntity.object3D.children[0]);
-  }
-
-  // Place big colored pillars at N/S/E/W, 50m away, 20m tall
-  const dist = 50;
+  if (!worldGroup) return;
+  const dist = 30;
   const markers = [
-    { name: 'N', x: 0, z: -dist, color: 0xff0000 },  // North = -Z
-    { name: 'E', x: dist, z: 0, color: 0x00ff00 },   // East = +X
-    { name: 'S', x: 0, z: dist, color: 0xffff00 },   // South = +Z
-    { name: 'W', x: -dist, z: 0, color: 0x00ffff },  // West = -X
+    { name: 'N', x: 0, z: -dist, color: 0xff0000 },
+    { name: 'E', x: dist, z: 0, color: 0x00ff00 },
+    { name: 'S', x: 0, z: dist, color: 0xffff00 },
+    { name: 'W', x: -dist, z: 0, color: 0x00ffff },
   ];
 
   markers.forEach(m => {
-    // Pillar
-    const geom = new THREE.CylinderGeometry(2, 2, 30, 8);
+    // Tall pillar
+    const geom = new THREE.CylinderGeometry(1.5, 1.5, 20, 8);
     const mat = new THREE.MeshBasicMaterial({ color: m.color });
     const pillar = new THREE.Mesh(geom, mat);
-    pillar.position.set(m.x, 5, m.z);
-    debugEntity.object3D.add(pillar);
+    pillar.position.set(m.x, 10, m.z);
+    pillar.userData = { isDebug: true };
+    worldGroup.add(pillar);
 
-    // Top cap with bigger sphere
-    const sphereGeom = new THREE.SphereGeometry(5, 12, 12);
-    const sphereMat = new THREE.MeshBasicMaterial({
-      color: m.color, transparent: true, opacity: 0.7
-    });
-    const sphere = new THREE.Mesh(sphereGeom, sphereMat);
-    sphere.position.set(m.x, 25, m.z);
-    debugEntity.object3D.add(sphere);
+    // Top sphere
+    const sg = new THREE.SphereGeometry(4, 12, 12);
+    const sm = new THREE.MeshBasicMaterial({ color: m.color, transparent: true, opacity: 0.7 });
+    const sphere = new THREE.Mesh(sg, sm);
+    sphere.position.set(m.x, 22, m.z);
+    sphere.userData = { isDebug: true };
+    worldGroup.add(sphere);
   });
 
-  // Add a center pillar at user position (at "ground")
-  const center = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.5, 0.5, 3, 8),
-    new THREE.MeshBasicMaterial({ color: 0xffffff })
-  );
-  center.position.set(0, 1.5, 0);
-  debugEntity.object3D.add(center);
+  // Center marker right at user (small white pillar at eye level area)
+  const cg = new THREE.BoxGeometry(0.5, 3, 0.5);
+  const cm = new THREE.MeshBasicMaterial({ color: 0xffffff });
+  const center = new THREE.Mesh(cg, cm);
+  center.position.set(0, 0, -5); // 5m in front of user
+  center.userData = { isDebug: true };
+  worldGroup.add(center);
 
-  showLog('Debug markers: N(red) E(green) S(yellow) W(cyan) at 50m');
+  showLog(`Debug: 4 pillars at ${dist}m + center at 5m front`);
 }
 
-// ----- Adjust height -----
 function adjustHeight(delta) {
   surfaceOffsetY += delta;
   document.getElementById('surface-offset').value = Math.round(surfaceOffsetY);
-  showLog(`Surface offset → ${surfaceOffsetY} m`);
-  // Re-apply to all meshes
+  showLog(`Surface Y offset: ${surfaceOffsetY}`);
   surfaceMeshes.forEach(mesh => {
-    const original = mesh.userData.originalPos;
-    if (!original) return;
-    const newPos = new Float32Array(original.length);
-    for (let i = 0; i < original.length; i += 3) {
-      newPos[i] = original[i];
-      newPos[i+1] = original[i+1] + delta;
-      newPos[i+2] = original[i+2];
-    }
-    mesh.userData.originalPos = Array.from(newPos);
-    mesh.geometry.attributes.position.array.set(newPos);
+    const arr = mesh.geometry.attributes.position.array;
+    for (let i = 1; i < arr.length; i += 3) arr[i] += delta;
     mesh.geometry.attributes.position.needsUpdate = true;
-    // Update children too (wireframe shares geometry; line doesn't)
+    mesh.geometry.computeVertexNormals();
     mesh.children.forEach(child => {
-      if (child.geometry && child !== mesh && child.type === 'Line') {
-        const arr = child.geometry.attributes.position.array;
-        for (let i = 1; i < arr.length; i += 3) arr[i] += delta;
+      if (child.type === 'Line') {
+        const ca = child.geometry.attributes.position.array;
+        for (let i = 1; i < ca.length; i += 3) ca[i] += delta;
         child.geometry.attributes.position.needsUpdate = true;
       }
     });
@@ -460,7 +445,7 @@ function setStatus(html) {
   if (el) el.innerHTML = html;
 }
 
-// ----- Compass -----
+// ----- Compass / heading-based world rotation -----
 let hasAbsolute = false;
 window.addEventListener('deviceorientationabsolute', (e) => {
   if (e.alpha != null) { userHeading = 360 - e.alpha; hasAbsolute = true; }
@@ -477,45 +462,71 @@ if (typeof DeviceOrientationEvent !== 'undefined' &&
   }, { once: true });
 }
 
+// IMPORTANT: Since we don't use gps-camera, we need to manually
+// rotate the world group to match compass heading.
+// A-Frame's camera (look-controls) reads device orientation directly
+// for camera rotation (pitch/yaw), but expects -Z = "forward looking".
+// So we rotate the world so that "north" (which is -Z in ENU) aligns
+// with the compass-reported heading.
+function updateWorldRotation() {
+  if (!worldGroup) return;
+  // The device's "forward" yaw is handled by look-controls (using gyro).
+  // We need to rotate world so that geographic North aligns with the
+  // initial device heading at app start.
+  // Simplest: rotate worldGroup around Y axis by -initialHeading
+  // so that whichever way you face at start = forward.
+  // We do this once at start.
+}
+
+// Capture initial heading when first rendering
+let initialHeadingCaptured = false;
+function captureInitialHeading() {
+  if (initialHeadingCaptured) return;
+  if (userHeading == null) return;
+  if (!worldGroup) return;
+  // Rotate world by -heading so that "what user is facing now" = forward
+  // userHeading is degrees clockwise from North
+  // In Three.js Y rotation, positive = counter-clockwise from above
+  // To make North align with current view direction:
+  worldGroup.rotation.y = userHeading * Math.PI / 180;
+  initialHeadingCaptured = true;
+  showLog(`Initial heading captured: ${userHeading.toFixed(0)}°`);
+}
+
 function startStatusLoop() {
   setInterval(() => {
     if (!userPos) return;
+    captureInitialHeading();
     const accClass = userPos.acc < 5 ? 'good' : userPos.acc < 15 ? 'warn' : 'bad';
     let html = `
       <div class="row"><span class="label">Pos</span><span>${userPos.lat.toFixed(5)}, ${userPos.lon.toFixed(5)}</span></div>
       <div class="row"><span class="label">Acc</span><span class="${accClass}">±${userPos.acc.toFixed(0)}m</span></div>
-      <div class="row"><span class="label">Alt</span><span>${userPos.alt ? userPos.alt.toFixed(0) + 'm' : 'N/A'}</span></div>
       <div class="row"><span class="label">Hdg</span><span>${userHeading.toFixed(0)}°</span></div>
       <div class="row"><span class="label">Surf-Y</span><span>${surfaceOffsetY.toFixed(0)}m</span></div>
+      <div class="row"><span class="label">Meshes</span><span>${surfaceMeshes.length}</span></div>
     `;
     setStatus(html);
   }, 500);
 }
 
-// ----- Mini-map (top-down 2D view) -----
+// ----- Mini-map -----
 function startMinimapLoop() {
   const canvas = document.getElementById('minimap');
   if (!canvas) return;
   const ctx = canvas.getContext('2d');
-  const W = canvas.width;
-  const H = canvas.height;
+  const W = canvas.width, H = canvas.height;
 
   function draw() {
     if (!anchorPos || allFeaturesEnu.length === 0) {
       requestAnimationFrame(draw);
       return;
     }
-
-    // Background
     ctx.fillStyle = 'rgba(0,0,0,0.7)';
     ctx.fillRect(0, 0, W, H);
-
-    // Compute scale: fit renderRadius into canvas (with margin)
-    const cx = W / 2, cy = H / 2;
+    const cx = W/2, cy = H/2;
     const margin = 10;
-    const scale = (Math.min(W, H) / 2 - margin) / renderRadius;
+    const scale = (Math.min(W, H)/2 - margin) / renderRadius;
 
-    // Draw range rings (1km, 2km, ...)
     ctx.strokeStyle = 'rgba(74, 222, 128, 0.3)';
     ctx.lineWidth = 1;
     for (let r = 1000; r <= renderRadius; r += 1000) {
@@ -524,7 +535,6 @@ function startMinimapLoop() {
       ctx.stroke();
     }
 
-    // Draw cardinal directions
     ctx.fillStyle = '#4ade80';
     ctx.font = 'bold 11px sans-serif';
     ctx.textAlign = 'center';
@@ -533,46 +543,38 @@ function startMinimapLoop() {
     ctx.fillText('E', W - 8, cy + 4);
     ctx.fillText('W', 8, cy + 4);
 
-    // Compute camera heading rotation
     const headingRad = userHeading * Math.PI / 180;
 
-    // Draw each feature outline
     allFeaturesEnu.forEach(p => {
       const colorHex = '#' + p.color.toString(16).padStart(6, '0');
       ctx.strokeStyle = colorHex;
-      ctx.fillStyle = colorHex + '40'; // semi-transparent
+      ctx.fillStyle = colorHex + '40';
       ctx.lineWidth = 1.5;
       ctx.beginPath();
       const ring = p.rings[0];
       ring.forEach(([lon, lat, alt], i) => {
         const enu = llToEnu(lat, lon, alt);
-        // Rotate around center by -heading so that "up" on map = where camera points
         const rx = enu.x * Math.cos(-headingRad) - (-enu.z) * Math.sin(-headingRad);
         const ry = enu.x * Math.sin(-headingRad) + (-enu.z) * Math.cos(-headingRad);
         const px = cx + rx * scale;
         const py = cy - ry * scale;
-        if (i === 0) ctx.moveTo(px, py);
-        else ctx.lineTo(px, py);
+        if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
       });
       ctx.closePath();
       ctx.fill();
       ctx.stroke();
     });
 
-    // Draw user position (center)
     ctx.fillStyle = '#ffffff';
     ctx.beginPath();
     ctx.arc(cx, cy, 4, 0, Math.PI * 2);
     ctx.fill();
-
-    // Draw heading arrow (pointing up = where camera points)
     ctx.strokeStyle = '#ffffff';
     ctx.lineWidth = 2;
     ctx.beginPath();
     ctx.moveTo(cx, cy);
     ctx.lineTo(cx, cy - 12);
     ctx.stroke();
-    // arrow head
     ctx.beginPath();
     ctx.moveTo(cx - 4, cy - 8);
     ctx.lineTo(cx, cy - 12);
