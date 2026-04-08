@@ -3,18 +3,37 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>AR OLS Surface Viewer v4</title>
+  <title>AR OLS Viewer v5 (Vanilla)</title>
 
-  <script src="https://aframe.io/releases/1.4.0/aframe.min.js"></script>
-  <script src="https://raw.githack.com/AR-js-org/AR.js/master/aframe/build/aframe-ar-nft.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.150.0/build/three.min.js"></script>
   <script src="https://unpkg.com/earcut@2.2.4/dist/earcut.min.js"></script>
 
   <style>
-    body { margin: 0; overflow: hidden; font-family: -apple-system, sans-serif; background: #111; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; overflow: hidden; height: 100%; background: #000; font-family: -apple-system, sans-serif; }
+
+    /* Camera video as background */
+    #cam-video {
+      position: fixed;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      object-fit: cover;
+      z-index: 1;
+    }
+
+    /* Three.js canvas overlay */
+    #three-canvas {
+      position: fixed;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      z-index: 2;
+      pointer-events: none;
+    }
+
     #ui {
       position: fixed; top: 0; left: 0; right: 0;
       background: rgba(0,0,0,0.78); color: white;
-      padding: 6px 10px; z-index: 1000;
+      padding: 6px 10px; z-index: 100;
       font-size: 11px; max-height: 25vh; overflow-y: auto;
     }
     #ui h3 { margin: 0 0 3px 0; font-size: 12px; }
@@ -28,7 +47,7 @@
       transform: translate(-50%, -50%);
       background: rgba(20,20,30,0.97); color: white;
       padding: 18px; border-radius: 14px;
-      z-index: 2000; text-align: center;
+      z-index: 200; text-align: center;
       width: 90%; max-width: 360px;
       box-shadow: 0 10px 40px rgba(0,0,0,0.6);
       max-height: 92vh; overflow-y: auto;
@@ -38,7 +57,7 @@
       display: block; width: 100%; padding: 11px; margin: 6px 0;
       background: #2563eb; color: white; border: none;
       border-radius: 8px; font-size: 13px; cursor: pointer;
-      box-sizing: border-box; font-weight: 600;
+      font-weight: 600;
     }
     #file-input button:disabled { background: #444; color: #888; }
     #file-input button.start-btn { background: #16a34a; font-size: 15px; padding: 13px; }
@@ -47,7 +66,7 @@
       display: block; width: 100%; padding: 12px; margin: 6px 0;
       background: #1e40af; color: white; border: 2px dashed #60a5fa;
       border-radius: 8px; font-size: 13px; cursor: pointer;
-      box-sizing: border-box; font-weight: 500;
+      font-weight: 500;
     }
     .file-label.has-file { background: #166534 !important; border-color: #4ade80 !important; }
     #file-input input[type=file] { display: none; }
@@ -75,7 +94,7 @@
     #minimap-container {
       position: fixed;
       bottom: 50px; right: 8px;
-      z-index: 1100;
+      z-index: 110;
       background: rgba(0,0,0,0.75);
       border: 2px solid #4ade80;
       border-radius: 50%;
@@ -88,8 +107,8 @@
       position: fixed; bottom: 8px; left: 8px; right: 8px;
       background: rgba(0,0,0,0.78); color: white;
       padding: 5px 8px; border-radius: 8px;
-      font-size: 9px; z-index: 1000;
-      display: flex; flex-wrap: wrap; gap: 6px; justify-content: center;
+      font-size: 9px; z-index: 100;
+      display: none; flex-wrap: wrap; gap: 6px; justify-content: center;
     }
     .swatch { display: inline-block; width: 9px; height: 9px; margin-right: 3px; vertical-align: middle; border-radius: 2px; }
 
@@ -98,7 +117,7 @@
       background: rgba(0,0,0,0.88); color: #4ade80;
       padding: 8px; border-radius: 8px;
       font-family: monospace; font-size: 9px;
-      z-index: 1500; max-height: 40vh; overflow-y: auto;
+      z-index: 150; max-height: 40vh; overflow-y: auto;
       display: none; white-space: pre-wrap;
     }
 
@@ -106,7 +125,7 @@
       position: fixed; right: 8px; top: 28%;
       display: none;
       flex-direction: column; gap: 6px;
-      z-index: 1100;
+      z-index: 110;
     }
     #floating-ctrl button {
       width: 44px; height: 44px;
@@ -117,14 +136,19 @@
       font-size: 18px;
       box-shadow: 0 2px 6px rgba(0,0,0,0.5);
     }
-    /* Make sure A-Frame canvas is on top of bg but below UI */
-    .a-canvas { z-index: 500 !important; }
   </style>
 </head>
 <body>
 
+<!-- Camera background -->
+<video id="cam-video" autoplay playsinline muted></video>
+
+<!-- Three.js canvas -->
+<canvas id="three-canvas"></canvas>
+
 <div id="file-input">
-  <h3>AR OLS Viewer v4</h3>
+  <h3>AR OLS Viewer v5</h3>
+  <p style="font-size:10px;opacity:0.7;margin:2px 0">Vanilla Three.js + getUserMedia</p>
 
   <label for="geojson-file" class="file-label" id="file-label">
     📂 แตะเพื่อเลือกไฟล์
@@ -146,7 +170,7 @@
   <div class="opts">
     <label class="checkbox">
       <input type="checkbox" id="auto-fit" checked>
-      <span>Auto-fit สูง (วาง surface ใกล้สายตา)</span>
+      <span>Auto-fit สูง</span>
     </label>
   </div>
 
@@ -168,15 +192,18 @@
     ▶ เริ่มดู AR
   </button>
 
-  <p style="font-size:9px;opacity:0.6;margin:4px 0">อนุญาต Location + Camera + Motion</p>
+  <p style="font-size:9px;opacity:0.6;margin:4px 0">
+    อนุญาต Camera + Location + Motion sensors<br>
+    ครั้งแรก: หันหน้าไปทาง <b>เหนือ</b> ก่อนกดเริ่ม
+  </p>
 </div>
 
 <div id="ui" style="display:none">
-  <h3>AR OLS v4</h3>
+  <h3>AR OLS v5</h3>
   <div id="status">เริ่มต้น...</div>
 </div>
 
-<div id="legend" style="display:none">
+<div id="legend">
   <div><span class="swatch" style="background:#3b82f6"></span>Inner H</div>
   <div><span class="swatch" style="background:#8b5cf6"></span>Conical</div>
   <div><span class="swatch" style="background:#22c55e"></span>Approach</div>
@@ -195,19 +222,6 @@
 </div>
 
 <div id="log"></div>
-
-<a-scene
-  id="scene"
-  vr-mode-ui="enabled: false"
-  arjs="sourceType: webcam; videoTexture: true; debugUIEnabled: false;"
-  renderer="antialias: true; alpha: true; logarithmicDepthBuffer: true;"
-  embedded
-  style="display:none">
-
-  <a-camera id="cam" rotation-reader far="100000" position="0 1.6 0">
-  </a-camera>
-
-</a-scene>
 
 <script src="app.js"></script>
 </body>

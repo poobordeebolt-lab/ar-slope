@@ -1,13 +1,13 @@
 // =============================================
-// AR OLS Surface Viewer v4
-// FIX: bypass gps-entity-place — attach mesh
-// directly to A-Frame scene's THREE.js root,
-// then manually orient the world based on
-// device compass heading every frame.
+// AR OLS Surface Viewer v5
+// VANILLA: Three.js + getUserMedia + DeviceOrientation
+// No AR.js, no A-Frame — full control
 // =============================================
 
 let userPos = null;
 let userHeading = 0;
+let userPitch = 0;
+let userRoll = 0;
 let surfaceData = null;
 let renderRadius = 8000;
 let testMode = false;
@@ -15,10 +15,11 @@ let autoFit = true;
 let showDebugMarkers = true;
 let surfaceOffsetY = 0;
 let anchorPos = null;
-let scene = null;
-let worldGroup = null; // THREE.Group containing everything
-let surfaceMeshes = [];
 let allFeaturesEnu = [];
+
+// Three.js
+let renderer, scene, camera, worldGroup;
+let surfaceMeshes = [];
 
 const SURFACE_COLORS = {
   'inner horizontal': 0x3b82f6,
@@ -98,7 +99,7 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 });
 
-function startAR() {
+async function startAR() {
   if (!surfaceData) return;
   renderRadius = parseInt(document.getElementById('render-radius').value) || 8000;
   testMode = document.getElementById('test-mode').checked;
@@ -106,40 +107,146 @@ function startAR() {
   showDebugMarkers = document.getElementById('debug-markers').checked;
   surfaceOffsetY = parseInt(document.getElementById('surface-offset').value) || 0;
 
-  showLog('=== AR v4 (no gps-entity-place) ===');
+  showLog('=== AR v5 (vanilla Three.js) ===');
   showLog(`Mode: ${testMode ? 'TEST' : 'REAL'}, Radius: ${renderRadius}m`);
 
   document.getElementById('file-input').style.display = 'none';
   document.getElementById('ui').style.display = 'block';
   document.getElementById('legend').style.display = 'flex';
-  document.getElementById('scene').style.display = 'block';
   document.getElementById('minimap-container').style.display = 'block';
   document.getElementById('floating-ctrl').style.display = 'flex';
 
-  scene = document.querySelector('a-scene');
-
-  // Wait for scene to load before attaching to THREE.js
-  if (scene.hasLoaded) {
-    initWorldGroup();
-  } else {
-    scene.addEventListener('loaded', initWorldGroup);
+  // Request iOS sensor permission
+  if (typeof DeviceOrientationEvent !== 'undefined' &&
+      typeof DeviceOrientationEvent.requestPermission === 'function') {
+    try {
+      const perm = await DeviceOrientationEvent.requestPermission();
+      showLog(`iOS sensor: ${perm}`);
+    } catch (e) {}
   }
 
+  // Start camera
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false
+    });
+    const video = document.getElementById('cam-video');
+    video.srcObject = stream;
+    await video.play();
+    showLog(`Camera: ${video.videoWidth}x${video.videoHeight}`);
+  } catch (err) {
+    showLog('Camera error: ' + err.message, true);
+    alert('ไม่สามารถเปิดกล้อง: ' + err.message);
+    return;
+  }
+
+  // Setup Three.js
+  initThree();
+  startSensors();
   startStatusLoop();
   startMinimapLoop();
   waitForGPSThenRender();
+  animate();
 }
 
-function initWorldGroup() {
-  // Create a world group attached directly to scene's THREE root
-  worldGroup = new THREE.Group();
-  worldGroup.name = 'ols_world';
-  scene.object3D.add(worldGroup);
-  showLog('World group attached to scene.object3D');
+function initThree() {
+  const canvas = document.getElementById('three-canvas');
+  renderer = new THREE.WebGLRenderer({
+    canvas: canvas,
+    alpha: true,
+    antialias: true,
+    logarithmicDepthBuffer: true
+  });
+  renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setClearColor(0x000000, 0); // transparent
 
-  // Add a soft ambient light for materials
+  scene = new THREE.Scene();
+
+  camera = new THREE.PerspectiveCamera(
+    70,
+    window.innerWidth / window.innerHeight,
+    0.1,
+    100000
+  );
+  camera.position.set(0, 1.6, 0); // eye level
+
+  worldGroup = new THREE.Group();
+  scene.add(worldGroup);
+
   const light = new THREE.AmbientLight(0xffffff, 1.0);
-  scene.object3D.add(light);
+  scene.add(light);
+
+  window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+
+  showLog('Three.js initialized');
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+
+  // Update camera rotation from device orientation
+  // Convert device orientation to Three.js camera rotation
+  // Note: this is a simplified conversion that works well in landscape & portrait
+  if (deviceOrientation) {
+    updateCameraFromOrientation();
+  }
+
+  renderer.render(scene, camera);
+}
+
+let deviceOrientation = null;
+
+function startSensors() {
+  // Use deviceorientationabsolute if available (Android), fallback otherwise
+  function handleOrientation(event) {
+    deviceOrientation = {
+      alpha: event.alpha, // compass (0-360)
+      beta: event.beta,   // pitch (-180 to 180)
+      gamma: event.gamma, // roll (-90 to 90)
+      absolute: event.absolute,
+      webkitCompassHeading: event.webkitCompassHeading
+    };
+
+    if (event.webkitCompassHeading != null) {
+      userHeading = event.webkitCompassHeading;
+    } else if (event.alpha != null) {
+      userHeading = (360 - event.alpha) % 360;
+    }
+    if (event.beta != null) userPitch = event.beta;
+    if (event.gamma != null) userRoll = event.gamma;
+  }
+
+  window.addEventListener('deviceorientationabsolute', handleOrientation, true);
+  window.addEventListener('deviceorientation', handleOrientation, true);
+
+  showLog('Sensors listening');
+}
+
+// Convert device orientation to Three.js camera rotation
+// Reference: https://developer.mozilla.org/en-US/docs/Web/API/Device_orientation_events
+function updateCameraFromOrientation() {
+  if (!deviceOrientation) return;
+  const alpha = (deviceOrientation.alpha || 0) * Math.PI / 180; // Z (yaw)
+  const beta = (deviceOrientation.beta || 0) * Math.PI / 180;   // X (pitch)
+  const gamma = (deviceOrientation.gamma || 0) * Math.PI / 180; // Y (roll)
+  const orient = (window.orientation || 0) * Math.PI / 180;     // screen rotation
+
+  // Standard Web sensor → Three.js camera quaternion
+  const euler = new THREE.Euler();
+  const q0 = new THREE.Quaternion();
+  const q1 = new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5)); // -PI/2 around X
+
+  euler.set(beta, alpha, -gamma, 'YXZ');
+  camera.quaternion.setFromEuler(euler);
+  camera.quaternion.multiply(q1); // camera looks out the back
+  q0.setFromAxisAngle(new THREE.Vector3(0, 0, 1), -orient);
+  camera.quaternion.multiply(q0);
 }
 
 function waitForGPSThenRender() {
@@ -157,20 +264,9 @@ function waitForGPSThenRender() {
     };
     if (!window._rendered) {
       showLog(`GPS: ${userPos.lat.toFixed(5)}, ${userPos.lon.toFixed(5)}`);
-      showLog(`Acc: ±${userPos.acc.toFixed(0)}m, Alt: ${userPos.alt?.toFixed(0)}m`);
-      // Wait for worldGroup to be ready
-      if (worldGroup) {
-        decideAnchorAndRender();
-        window._rendered = true;
-      } else {
-        const wait = setInterval(() => {
-          if (worldGroup) {
-            clearInterval(wait);
-            decideAnchorAndRender();
-            window._rendered = true;
-          }
-        }, 100);
-      }
+      showLog(`Acc: ±${userPos.acc.toFixed(0)}m`);
+      decideAnchorAndRender();
+      window._rendered = true;
       setTimeout(() => {
         const logEl = document.getElementById('log');
         if (logEl) logEl.style.display = 'none';
@@ -187,8 +283,8 @@ function decideAnchorAndRender() {
     if (centroid) {
       const shiftLat = userPos.lat - centroid.lat;
       const shiftLon = userPos.lon - centroid.lon;
-      showLog(`Test: shift ${shiftLat.toFixed(4)}, ${shiftLon.toFixed(4)}`);
       shiftAllCoords(surfaceData, shiftLat, shiftLon);
+      showLog(`Test: shifted to user`);
     }
   }
   anchorPos = { lat: userPos.lat, lon: userPos.lon };
@@ -218,8 +314,9 @@ function shiftAllCoords(geojson, dLat, dLon) {
   geojson.features.forEach(f => walk(f.geometry.coordinates));
 }
 
-// ENU coordinates (East, Up, -North) — suitable for THREE.js
-// At Y=0 = anchor altitude (we'll add surfaceOffsetY)
+// In our world:
+// X = East, Y = Up (altitude), Z = -North (forward of viewer when facing north)
+// Camera orientation handled by updateCameraFromOrientation
 function llToEnu(lat, lon, alt) {
   const R = 6378137;
   const dLat = (lat - anchorPos.lat) * Math.PI / 180;
@@ -227,7 +324,6 @@ function llToEnu(lat, lon, alt) {
   const refLatRad = anchorPos.lat * Math.PI / 180;
   const east  = dLon * R * Math.cos(refLatRad);
   const north = dLat * R;
-  // alt is absolute MSL; we'll handle the offset later
   return { x: east, y: (alt || 0), z: -north };
 }
 
@@ -271,40 +367,25 @@ function computeAutoFit() {
   allFeaturesEnu.forEach(p => {
     if (p.minDist > renderRadius) return;
     p.rings.forEach(ring => {
-      ring.forEach(([lon, lat, alt]) => {
-        if (alt < minAlt) minAlt = alt;
-      });
+      ring.forEach(([lon, lat, alt]) => { if (alt < minAlt) minAlt = alt; });
     });
   });
   if (minAlt === Infinity) return;
-  // Target: lowest visible surface point at Y = +5 m above eye (eye at Y=0)
-  // Mesh world Y = enu.y + surfaceOffsetY = alt + offset
-  // Want = 5 → offset = 5 - alt
-  surfaceOffsetY = 5 - minAlt;
+  // Camera at Y=1.6, want lowest surface at Y~10 (visible above horizon)
+  surfaceOffsetY = 10 - minAlt;
   showLog(`Auto-fit: minAlt=${minAlt.toFixed(0)}, offset=${surfaceOffsetY.toFixed(0)}`);
   document.getElementById('surface-offset').value = Math.round(surfaceOffsetY);
 }
 
 function renderSurfaces() {
-  if (!worldGroup) {
-    showLog('No worldGroup yet, retry...');
-    setTimeout(renderSurfaces, 200);
-    return;
-  }
-
-  // Clear previous surface meshes (keep debug markers)
+  // Clear previous surface meshes
   surfaceMeshes.forEach(m => worldGroup.remove(m));
   surfaceMeshes = [];
 
-  let polyCount = 0;
-  let totalTris = 0;
-  let skipped = 0;
+  let polyCount = 0, totalTris = 0, skipped = 0;
 
   allFeaturesEnu.forEach(p => {
-    if (p.minDist > renderRadius) {
-      skipped++;
-      return;
-    }
+    if (p.minDist > renderRadius) { skipped++; return; }
     const mesh = createPolygonMesh(p.rings, p.color, p.name);
     if (mesh) {
       worldGroup.add(mesh);
@@ -314,8 +395,8 @@ function renderSurfaces() {
     }
   });
 
-  showLog(`✓ Rendered ${polyCount} polys, ${totalTris} tris in worldGroup`);
-  showLog(`worldGroup.children: ${worldGroup.children.length}`);
+  showLog(`✓ Rendered ${polyCount} polys, ${totalTris} tris`);
+  showLog(`scene.children: ${scene.children.length}, world.children: ${worldGroup.children.length}`);
   setStatus(`${polyCount} polys, ${totalTris} tris`);
 }
 
@@ -350,21 +431,19 @@ function createPolygonMesh(rings, color, name) {
   geom.setIndex(tris);
   geom.computeVertexNormals();
 
-  // Use MeshBasicMaterial — doesn't need lights
   const mat = new THREE.MeshBasicMaterial({
     color: color, transparent: true, opacity: 0.4,
     side: THREE.DoubleSide, depthWrite: false
   });
   const mesh = new THREE.Mesh(geom, mat);
   mesh.name = name;
-  mesh.userData = { name, triCount: tris.length / 3, originalPos: pos3D.slice() };
+  mesh.userData = { name, triCount: tris.length / 3 };
 
-  // Wireframe child
+  // Wireframe overlay
   const wireMat = new THREE.MeshBasicMaterial({
-    color: color, wireframe: true, transparent: true, opacity: 0.9
+    color: color, wireframe: true, transparent: true, opacity: 0.85
   });
-  const wireMesh = new THREE.Mesh(geom, wireMat);
-  mesh.add(wireMesh);
+  mesh.add(new THREE.Mesh(geom, wireMat));
 
   // Outline of outer ring
   const outPts = [];
@@ -374,16 +453,13 @@ function createPolygonMesh(rings, color, name) {
   });
   const lineGeom = new THREE.BufferGeometry().setFromPoints(outPts);
   const lineMat = new THREE.LineBasicMaterial({ color: color });
-  const line = new THREE.Line(lineGeom, lineMat);
-  line.userData = { isOutline: true, originalPos: outPts.map(p => [p.x, p.y, p.z]) };
-  mesh.add(line);
+  mesh.add(new THREE.Line(lineGeom, lineMat));
 
   return mesh;
 }
 
-// ----- Debug markers -----
 function renderDebugMarkers() {
-  if (!worldGroup) return;
+  // Big colored pillars at cardinal directions
   const dist = 30;
   const markers = [
     { name: 'N', x: 0, z: -dist, color: 0xff0000 },
@@ -393,43 +469,39 @@ function renderDebugMarkers() {
   ];
 
   markers.forEach(m => {
-    // Tall pillar
-    const geom = new THREE.CylinderGeometry(1.5, 1.5, 20, 8);
+    const geom = new THREE.CylinderGeometry(2, 2, 20, 8);
     const mat = new THREE.MeshBasicMaterial({ color: m.color });
     const pillar = new THREE.Mesh(geom, mat);
     pillar.position.set(m.x, 10, m.z);
-    pillar.userData = { isDebug: true };
     worldGroup.add(pillar);
 
-    // Top sphere
-    const sg = new THREE.SphereGeometry(4, 12, 12);
+    // Big sphere on top
+    const sg = new THREE.SphereGeometry(5, 12, 12);
     const sm = new THREE.MeshBasicMaterial({ color: m.color, transparent: true, opacity: 0.7 });
     const sphere = new THREE.Mesh(sg, sm);
-    sphere.position.set(m.x, 22, m.z);
-    sphere.userData = { isDebug: true };
+    sphere.position.set(m.x, 25, m.z);
     worldGroup.add(sphere);
   });
 
-  // Center marker right at user (small white pillar at eye level area)
-  const cg = new THREE.BoxGeometry(0.5, 3, 0.5);
-  const cm = new THREE.MeshBasicMaterial({ color: 0xffffff });
-  const center = new THREE.Mesh(cg, cm);
-  center.position.set(0, 0, -5); // 5m in front of user
-  center.userData = { isDebug: true };
-  worldGroup.add(center);
+  // CRITICAL TEST: a big red box right in front of camera at 5m
+  const testGeom = new THREE.BoxGeometry(2, 2, 2);
+  const testMat = new THREE.MeshBasicMaterial({ color: 0xff00ff });
+  const testBox = new THREE.Mesh(testGeom, testMat);
+  testBox.position.set(0, 1.6, -5); // 5m in front of camera at eye level
+  scene.add(testBox); // Add directly to scene, not worldGroup
+  showLog('TEST BOX added at (0, 1.6, -5) - should always be visible');
 
-  showLog(`Debug: 4 pillars at ${dist}m + center at 5m front`);
+  showLog(`Debug: 4 pillars at ${dist}m around`);
 }
 
 function adjustHeight(delta) {
   surfaceOffsetY += delta;
   document.getElementById('surface-offset').value = Math.round(surfaceOffsetY);
-  showLog(`Surface Y offset: ${surfaceOffsetY}`);
+  showLog(`Surface Y: ${surfaceOffsetY}`);
   surfaceMeshes.forEach(mesh => {
     const arr = mesh.geometry.attributes.position.array;
     for (let i = 1; i < arr.length; i += 3) arr[i] += delta;
     mesh.geometry.attributes.position.needsUpdate = true;
-    mesh.geometry.computeVertexNormals();
     mesh.children.forEach(child => {
       if (child.type === 'Line') {
         const ca = child.geometry.attributes.position.array;
@@ -445,58 +517,9 @@ function setStatus(html) {
   if (el) el.innerHTML = html;
 }
 
-// ----- Compass / heading-based world rotation -----
-let hasAbsolute = false;
-window.addEventListener('deviceorientationabsolute', (e) => {
-  if (e.alpha != null) { userHeading = 360 - e.alpha; hasAbsolute = true; }
-}, true);
-window.addEventListener('deviceorientation', (e) => {
-  if (e.webkitCompassHeading) userHeading = e.webkitCompassHeading;
-  else if (e.alpha != null && !hasAbsolute) userHeading = 360 - e.alpha;
-});
-
-if (typeof DeviceOrientationEvent !== 'undefined' &&
-    typeof DeviceOrientationEvent.requestPermission === 'function') {
-  document.body.addEventListener('click', () => {
-    DeviceOrientationEvent.requestPermission();
-  }, { once: true });
-}
-
-// IMPORTANT: Since we don't use gps-camera, we need to manually
-// rotate the world group to match compass heading.
-// A-Frame's camera (look-controls) reads device orientation directly
-// for camera rotation (pitch/yaw), but expects -Z = "forward looking".
-// So we rotate the world so that "north" (which is -Z in ENU) aligns
-// with the compass-reported heading.
-function updateWorldRotation() {
-  if (!worldGroup) return;
-  // The device's "forward" yaw is handled by look-controls (using gyro).
-  // We need to rotate world so that geographic North aligns with the
-  // initial device heading at app start.
-  // Simplest: rotate worldGroup around Y axis by -initialHeading
-  // so that whichever way you face at start = forward.
-  // We do this once at start.
-}
-
-// Capture initial heading when first rendering
-let initialHeadingCaptured = false;
-function captureInitialHeading() {
-  if (initialHeadingCaptured) return;
-  if (userHeading == null) return;
-  if (!worldGroup) return;
-  // Rotate world by -heading so that "what user is facing now" = forward
-  // userHeading is degrees clockwise from North
-  // In Three.js Y rotation, positive = counter-clockwise from above
-  // To make North align with current view direction:
-  worldGroup.rotation.y = userHeading * Math.PI / 180;
-  initialHeadingCaptured = true;
-  showLog(`Initial heading captured: ${userHeading.toFixed(0)}°`);
-}
-
 function startStatusLoop() {
   setInterval(() => {
     if (!userPos) return;
-    captureInitialHeading();
     const accClass = userPos.acc < 5 ? 'good' : userPos.acc < 15 ? 'warn' : 'bad';
     let html = `
       <div class="row"><span class="label">Pos</span><span>${userPos.lat.toFixed(5)}, ${userPos.lon.toFixed(5)}</span></div>
@@ -509,7 +532,6 @@ function startStatusLoop() {
   }, 500);
 }
 
-// ----- Mini-map -----
 function startMinimapLoop() {
   const canvas = document.getElementById('minimap');
   if (!canvas) return;
@@ -518,8 +540,7 @@ function startMinimapLoop() {
 
   function draw() {
     if (!anchorPos || allFeaturesEnu.length === 0) {
-      requestAnimationFrame(draw);
-      return;
+      requestAnimationFrame(draw); return;
     }
     ctx.fillStyle = 'rgba(0,0,0,0.7)';
     ctx.fillRect(0, 0, W, H);
@@ -544,7 +565,6 @@ function startMinimapLoop() {
     ctx.fillText('W', 8, cy + 4);
 
     const headingRad = userHeading * Math.PI / 180;
-
     allFeaturesEnu.forEach(p => {
       const colorHex = '#' + p.color.toString(16).padStart(6, '0');
       ctx.strokeStyle = colorHex;
@@ -580,7 +600,6 @@ function startMinimapLoop() {
     ctx.lineTo(cx, cy - 12);
     ctx.lineTo(cx + 4, cy - 8);
     ctx.stroke();
-
     requestAnimationFrame(draw);
   }
   draw();
