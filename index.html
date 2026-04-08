@@ -3,235 +3,153 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>AR Pre-Survey v10</title>
-
+  <title>AR Pre-Survey (New Absolute Coordinates)</title>
   <script src="https://cdn.jsdelivr.net/npm/three@0.150.0/build/three.min.js"></script>
   <script src="https://unpkg.com/earcut@2.2.4/dist/earcut.min.js"></script>
-
   <style>
     * { box-sizing: border-box; }
-    html, body { margin: 0; padding: 0; overflow: hidden; height: 100%; background: #000; font-family: -apple-system, sans-serif; -webkit-tap-highlight-color: transparent; }
-
-    #cam-video { position: fixed; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; z-index: 1; }
-    #three-canvas { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 2; pointer-events: none; }
-
-    #crosshair {
-      position: fixed; top: 50%; left: 50%;
-      transform: translate(-50%, -50%);
-      width: 40px; height: 40px;
-      pointer-events: none; z-index: 90; display: none;
+    html, body { margin: 0; padding: 0; overflow: hidden; height: 100%; background: #111; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    
+    #video-bg { position: fixed; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; z-index: 1; }
+    #ar-canvas { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 2; pointer-events: none; }
+    
+    #ui-setup {
+      position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+      background: rgba(15, 23, 42, 0.95); z-index: 100;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      overflow-y: auto; padding: 20px; color: white;
     }
-    #crosshair::before, #crosshair::after { content: ''; position: absolute; background: rgba(74, 222, 128, 0.9); }
-    #crosshair::before { top: 50%; left: 0; right: 0; height: 1px; }
-    #crosshair::after { left: 50%; top: 0; bottom: 0; width: 1px; }
-
-    #ui {
-      position: fixed; top: 0; left: 0; right: 0;
-      background: rgba(0,0,0,0.78); color: white;
-      padding: 6px 10px; z-index: 100;
-      font-size: 11px; max-height: 30vh; overflow-y: auto;
+    .setup-card {
+      background: #1e293b; padding: 20px; border-radius: 12px; width: 100%; max-width: 400px;
+      box-shadow: 0 10px 25px rgba(0,0,0,0.5);
     }
-    #ui h3 { margin: 0 0 3px 0; font-size: 12px; }
-    #status { font-family: monospace; font-size: 10px; line-height: 1.4; }
-    .row { display: flex; justify-content: space-between; }
-    .label { opacity: 0.7; }
-    .good { color: #4ade80; } .warn { color: #fbbf24; } .bad { color: #f87171; }
+    .setup-card h2 { margin-top: 0; color: #38bdf8; font-size: 20px; text-align: center; }
+    .file-group { margin-bottom: 12px; }
+    .file-group label { display: block; font-size: 13px; margin-bottom: 4px; color: #94a3b8; }
+    .file-btn { display: block; width: 100%; background: #334155; color: white; border: 1px dashed #64748b; padding: 10px; text-align: center; border-radius: 6px; cursor: pointer; font-size: 14px; }
+    .file-btn.loaded { background: #064e3b; border-color: #10b981; color: #34d399; }
+    input[type="file"] { display: none; }
+    .setup-card button.start { width: 100%; background: #2563eb; color: white; border: none; padding: 14px; border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer; margin-top: 10px; }
+    .setup-card button.start:disabled { background: #475569; color: #94a3b8; cursor: not-allowed; }
 
-    #file-input {
-      position: fixed; top: 50%; left: 50%;
-      transform: translate(-50%, -50%);
-      background: rgba(20,20,30,0.97); color: white;
-      padding: 14px; border-radius: 14px;
-      z-index: 200; text-align: center;
-      width: 92%; max-width: 380px;
-      box-shadow: 0 10px 40px rgba(0,0,0,0.6);
-      max-height: 95vh; overflow-y: auto;
+    #ui-ar {
+      position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 10; pointer-events: none; display: none;
     }
-    #file-input h3 { margin: 0 0 4px 0; font-size: 15px; }
-    #file-input .subtitle { font-size: 9px; opacity: 0.7; margin: 2px 0 8px 0; }
-    #file-input button {
-      display: block; width: 100%; padding: 10px; margin: 5px 0;
-      background: #2563eb; color: white; border: none;
-      border-radius: 8px; font-size: 13px; cursor: pointer; font-weight: 600;
+    .info-panel {
+      position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.7);
+      padding: 10px; border-radius: 8px; color: white; font-family: monospace; font-size: 11px;
+      pointer-events: auto; min-width: 200px;
     }
-    #file-input button:disabled { background: #444; color: #888; }
-    #file-input button.start-btn { background: #16a34a; font-size: 14px; padding: 12px; }
-    #file-input button.start-btn:disabled { background: #444; }
-    #file-input .file-label {
-      display: block; width: 100%; padding: 9px; margin: 4px 0;
-      background: #1e40af; color: white; border: 2px dashed #60a5fa;
-      border-radius: 8px; font-size: 12px; cursor: pointer; font-weight: 500;
-    }
-    .file-label.has-file { background: #166534 !important; border-color: #4ade80 !important; }
-    #file-input input[type=file] { display: none; }
-    .file-status { font-size: 9px; padding: 4px; background: rgba(0,0,0,0.4); border-radius: 6px; margin: 3px 0; min-height: 12px; font-family: monospace; text-align: left; }
-    .opts { display: flex; gap: 6px; align-items: center; justify-content: space-between; margin: 4px 0; font-size: 11px; padding: 5px 8px; background: rgba(255,255,255,0.05); border-radius: 6px; }
-    .opts input[type=number] { width: 70px; padding: 4px; border-radius: 6px; border: 1px solid #555; background: #222; color: white; font-size: 11px; }
-    .opts label.checkbox { display: flex; align-items: center; gap: 6px; width: 100%; cursor: pointer; font-size: 11px; }
-    .opts input[type=checkbox] { width: 16px; height: 16px; }
-    .section-header { font-size: 10px; font-weight: 600; color: #60a5fa; margin: 6px 0 2px 0; text-align: left; border-bottom: 1px solid #334155; padding-bottom: 2px; }
+    .info-panel .hl { color: #34d399; font-weight: bold; }
+    .info-panel .warn { color: #fbbf24; }
 
-    #minimap-container { position: fixed; bottom: 50px; right: 8px; z-index: 110; background: rgba(0,0,0,0.75); border: 2px solid #4ade80; border-radius: 50%; padding: 4px; display: none; }
-    #minimap { display: block; border-radius: 50%; }
-
-    #legend { position: fixed; bottom: 8px; left: 8px; right: 8px; background: rgba(0,0,0,0.78); color: white; padding: 5px 8px; border-radius: 8px; font-size: 9px; z-index: 100; display: none; flex-wrap: wrap; gap: 6px; justify-content: center; }
-    .swatch { display: inline-block; width: 9px; height: 9px; margin-right: 3px; vertical-align: middle; border-radius: 2px; }
-
-    #log { position: fixed; top: 28%; left: 8px; right: 8px; background: rgba(0,0,0,0.88); color: #4ade80; padding: 8px; border-radius: 8px; font-family: monospace; font-size: 9px; z-index: 150; max-height: 40vh; overflow-y: auto; display: none; white-space: pre-wrap; }
-
-    #control-panel {
-      position: fixed; right: 6px; top: 28%; z-index: 110;
-      background: rgba(20, 20, 30, 0.85); border-radius: 12px;
-      padding: 8px 6px; display: none; flex-direction: column;
-      gap: 6px; width: 80px; max-height: 65vh; overflow-y: auto;
+    .crosshair {
+      position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+      width: 30px; height: 30px; pointer-events: none;
     }
-    #control-panel .ctrl-section {
-      display: flex; flex-direction: column; gap: 3px;
-      padding-bottom: 5px; border-bottom: 1px solid rgba(255,255,255,0.15);
-    }
-    #control-panel .ctrl-section:last-child { border-bottom: none; }
-    #control-panel .ctrl-label { font-size: 8px; color: rgba(255,255,255,0.6); text-align: center; text-transform: uppercase; letter-spacing: 0.5px; }
-    #control-panel .btn-row { display: flex; gap: 3px; justify-content: center; }
-    #control-panel button {
-      flex: 1; min-width: 30px; height: 32px; border-radius: 6px; border: none;
-      color: white; font-size: 11px; font-weight: 600;
-      box-shadow: 0 1px 3px rgba(0,0,0,0.5); padding: 0; cursor: pointer;
-    }
-    #control-panel button.cal { background: rgba(245, 158, 11, 0.85); }
-    #control-panel button.toggle { background: rgba(139, 92, 246, 0.85); font-size: 10px; }
-    #control-panel button.toggle.off { background: rgba(75, 85, 99, 0.85); opacity: 0.5; }
-    #control-panel button.action { background: rgba(16, 185, 129, 0.85); font-size: 9px; }
-    #control-panel .slider-wrap { padding: 3px 4px; }
-    #control-panel input[type=range] { width: 100%; margin: 0; accent-color: #4ade80; }
-    #control-panel .slider-val { text-align: center; font-family: monospace; font-size: 10px; color: #4ade80; margin-top: 2px; }
+    .crosshair::before { content: ''; position: absolute; top: 50%; left: 0; right: 0; height: 2px; background: rgba(255,255,255,0.8); transform: translateY(-50%); }
+    .crosshair::after { content: ''; position: absolute; left: 50%; top: 0; bottom: 0; width: 2px; background: rgba(255,255,255,0.8); transform: translateX(-50%); }
 
-    #aim-info {
-      position: fixed; top: 50%; left: 50%;
-      transform: translate(-50%, calc(-50% + 30px));
-      background: rgba(0,0,0,0.85); color: #4ade80;
-      padding: 6px 10px; border-radius: 6px;
-      font-family: monospace; font-size: 10px;
-      z-index: 90; pointer-events: none; display: none;
-      white-space: pre; text-align: left; min-width: 200px;
+    .target-info {
+      position: absolute; top: 55%; left: 50%; transform: translateX(-50%);
+      background: rgba(0,0,0,0.8); color: #38bdf8; padding: 8px 12px; border-radius: 6px;
+      font-family: monospace; font-size: 12px; white-space: pre; text-align: left;
+    }
+
+    .controls {
+      position: absolute; bottom: 20px; left: 10px; right: 10px;
+      background: rgba(0,0,0,0.7); border-radius: 8px; padding: 10px; pointer-events: auto;
+      display: flex; flex-direction: column; gap: 8px;
+    }
+    .control-row { display: flex; align-items: center; justify-content: space-between; color: white; font-size: 12px; }
+    .control-row input[type="range"] { flex: 1; margin: 0 10px; }
+    
+    .layer-toggles { display: flex; gap: 5px; margin-top: 5px; flex-wrap: wrap; }
+    .layer-btn { background: #334155; color: white; border: none; padding: 6px 10px; border-radius: 4px; font-size: 11px; cursor: pointer; }
+    .layer-btn.active { background: #2563eb; }
+
+    #log {
+      position: absolute; bottom: 120px; left: 10px; right: 10px; max-height: 100px;
+      background: rgba(0,0,0,0.6); color: #a3e635; font-family: monospace; font-size: 10px;
+      padding: 8px; border-radius: 6px; overflow-y: auto; pointer-events: auto;
     }
   </style>
 </head>
 <body>
 
-<video id="cam-video" autoplay playsinline muted></video>
-<canvas id="three-canvas"></canvas>
+<video id="video-bg" autoplay playsinline muted></video>
+<canvas id="ar-canvas"></canvas>
 
-<div id="crosshair"></div>
-<div id="aim-info"></div>
-
-<div id="file-input">
-  <h3>AR Pre-Survey v10</h3>
-  <p class="subtitle">ตรวจสอบ OLS/OCS surfaces เทียบวัตถุจริง<br>ใช้ DTM เป็นระดับพื้น (ไม่ใช้ GPS altitude)</p>
-
-  <div class="section-header">1. OLS Surface (ellipsoidal)</div>
-  <label for="ols-file" class="file-label" id="ols-label">📂 OLS GeoJSON</label>
-  <input type="file" id="ols-file" accept=".geojson,.json">
-  <div id="ols-status" class="file-status">ไม่บังคับ (ต้องมี OLS หรือ OCS อย่างน้อย 1)</div>
-
-  <div class="section-header">2. OCS Surface (ellipsoidal)</div>
-  <label for="ocs-file" class="file-label" id="ocs-label">📂 OCS GeoJSON</label>
-  <input type="file" id="ocs-file" accept=".geojson,.json">
-  <div id="ocs-status" class="file-status">ไม่บังคับ (ต้องมี OLS หรือ OCS อย่างน้อย 1)</div>
-
-  <div class="section-header">3. DTM (ellipsoidal) — ระดับพื้นจริง</div>
-  <label for="dtm-header-file" class="file-label" id="dtm-header-label">📂 DTM .json (header)</label>
-  <input type="file" id="dtm-header-file" accept=".json">
-  <label for="dtm-bin-file" class="file-label" id="dtm-bin-label">📂 DTM .dtm (binary)</label>
-  <input type="file" id="dtm-bin-file" accept=".dtm,application/octet-stream">
-  <div id="dtm-status" class="file-status">จำเป็น — ใช้แทน GPS altitude</div>
-
-  <div class="section-header">4. Height Blocks (OLS)</div>
-  <label for="hblock-file" class="file-label" id="hblock-label">📂 Height Block GeoJSON</label>
-  <input type="file" id="hblock-file" accept=".geojson,.json">
-  <div id="hblock-status" class="file-status">ไม่บังคับ — แสดงความสูงที่อนุญาตแต่ละ block</div>
-
-  <div class="section-header">5. ตัวเลือก</div>
-  <div class="opts">
-    <span>Fallback ground (m):</span>
-    <span><input type="number" id="manual-ground" value="18" step="1"> m</span>
-  </div>
-  <div class="opts">
-    <span>OLS/OCS รัศมี:</span>
-    <span><input type="number" id="render-radius" value="8000" min="200" max="20000" step="500"> m</span>
-  </div>
-  <div class="opts">
-    <span>Block รัศมี:</span>
-    <span><input type="number" id="block-radius" value="2000" min="200" max="10000" step="200"> m</span>
-  </div>
-  <div class="opts">
-    <span>Terrain รัศมี:</span>
-    <span><input type="number" id="terrain-radius" value="1000" min="200" max="3000" step="200"> m</span>
-  </div>
-  <div class="opts">
-    <label class="checkbox"><input type="checkbox" id="test-mode"><span>โหมดทดสอบ (ย้ายข้อมูลมาที่ user)</span></label>
-  </div>
-
-  <button class="start-btn" id="start-btn" onclick="startAR()" disabled>▶ เริ่ม Pre-Survey</button>
-</div>
-
-<div id="ui" style="display:none">
-  <h3>AR Pre-Survey v10</h3>
-  <div id="status">เริ่มต้น...</div>
-</div>
-
-<div id="legend">
-  <div><span class="swatch" style="background:#3b82f6"></span>Inner H</div>
-  <div><span class="swatch" style="background:#8b5cf6"></span>Conical</div>
-  <div><span class="swatch" style="background:#22c55e"></span>Approach</div>
-  <div><span class="swatch" style="background:#f59e0b"></span>Take-off</div>
-  <div><span class="swatch" style="background:#ec4899"></span>Trans</div>
-  <div style="border-left: 1px solid #555; padding-left: 6px;"><span class="swatch" style="background:#06b6d4"></span>OCS</div>
-  <div><span class="swatch" style="background:#10b981"></span>BLK สูง</div>
-  <div><span class="swatch" style="background:#ef4444"></span>BLK ต่ำ</div>
-  <div><span class="swatch" style="background:#94a3b8"></span>Terrain</div>
-</div>
-
-<div id="minimap-container">
-  <canvas id="minimap" width="180" height="180"></canvas>
-</div>
-
-<div id="control-panel">
-  <div class="ctrl-section">
-    <div class="ctrl-label">Ground Y (m)</div>
-    <div class="slider-wrap">
-      <input type="range" id="ground-slider" min="-50" max="50" value="0" step="0.5">
-      <div class="slider-val" id="ground-val">0.0</div>
+<div id="ui-setup">
+  <div class="setup-card">
+    <h2>AR Pre-Survey (Absolute Elev)</h2>
+    
+    <div class="file-group">
+      <label>1. OLS GeoJSON (Ellipsoidal)</label>
+      <label class="file-btn" id="lbl-ols">Select OLS File
+        <input type="file" id="file-ols" accept=".geojson,.json">
+      </label>
     </div>
-    <button class="action" onclick="snapTerrainToFeet()">SNAP</button>
-  </div>
 
-  <div class="ctrl-section">
-    <div class="ctrl-label">Heading (°)</div>
-    <div class="slider-wrap">
-      <input type="range" id="heading-slider" min="-180" max="180" value="0" step="1">
-      <div class="slider-val" id="heading-val">0</div>
+    <div class="file-group">
+      <label>2. OCS GeoJSON (Ellipsoidal)</label>
+      <label class="file-btn" id="lbl-ocs">Select OCS File
+        <input type="file" id="file-ocs" accept=".geojson,.json">
+      </label>
     </div>
-    <div class="btn-row">
-      <button class="cal" onclick="adjustHeadingSlider(-1)">−</button>
-      <button class="cal" onclick="adjustHeadingSlider(1)">+</button>
+
+    <div class="file-group">
+      <label>3. Height Blocks GeoJSON (Optional)</label>
+      <label class="file-btn" id="lbl-hblock">Select Height Blocks
+        <input type="file" id="file-hblock" accept=".geojson,.json">
+      </label>
+    </div>
+
+    <div class="file-group">
+      <label>4. DTM Header & Binary (Ellipsoidal Ground)</label>
+      <label class="file-btn" id="lbl-dtm-h" style="margin-bottom: 5px;">Select DTM .json
+        <input type="file" id="file-dtm-h" accept=".json">
+      </label>
+      <label class="file-btn" id="lbl-dtm-b">Select DTM .dtm
+        <input type="file" id="file-dtm-b" accept=".dtm,application/octet-stream">
+      </label>
+    </div>
+
+    <div style="margin-top: 15px; font-size: 12px; color: #cbd5e1;">
+      <label><input type="checkbox" id="chk-test"> Enable Test Mode (Shift surfaces to current GPS)</label>
+    </div>
+
+    <button class="start" id="btn-start" disabled>Start AR</button>
+  </div>
+</div>
+
+<div id="ui-ar">
+  <div class="info-panel" id="info-panel">
+    Waiting for GPS & DTM...
+  </div>
+  
+  <div id="log"></div>
+
+  <div class="crosshair"></div>
+  <div class="target-info" id="target-info"></div>
+
+  <div class="controls">
+    <div class="control-row">
+      <span>Camera FOV (<span id="val-fov">70</span>°)</span>
+      <input type="range" id="slide-fov" min="40" max="100" value="70">
+    </div>
+    <div class="control-row">
+      <span>Heading Offset (<span id="val-heading">0</span>°)</span>
+      <input type="range" id="slide-heading" min="-180" max="180" value="0">
+    </div>
+    <div class="layer-toggles">
+      <button class="layer-btn active" data-layer="ols">OLS</button>
+      <button class="layer-btn active" data-layer="ocs">OCS</button>
+      <button class="layer-btn active" data-layer="blocks">Blocks</button>
+      <button class="layer-btn active" data-layer="dtm">DTM Mesh</button>
     </div>
   </div>
-
-  <div class="ctrl-section">
-    <div class="ctrl-label">Layers</div>
-    <button class="toggle" id="btn-ols" onclick="toggleLayer('ols')">OLS</button>
-    <button class="toggle" id="btn-ocs" onclick="toggleLayer('ocs')">OCS</button>
-    <button class="toggle" id="btn-blk" onclick="toggleLayer('blocks')">BLK</button>
-    <button class="toggle" id="btn-lbl" onclick="toggleLayer('labels')">LBL</button>
-    <button class="toggle" id="btn-ter" onclick="toggleLayer('terrain')">TER</button>
-  </div>
-
-  <div class="ctrl-section">
-    <button class="cal" onclick="toggleLog()">LOG</button>
-  </div>
 </div>
-
-<div id="log"></div>
 
 <script src="app.js"></script>
 </body>
