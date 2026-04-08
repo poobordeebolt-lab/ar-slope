@@ -1,36 +1,70 @@
 // =============================================
-// AR Slope Surface Viewer
-// Designed for VTPO obstacle pre-survey
+// AR OLS Surface Viewer
+// Renders OLS surfaces as proper 3D meshes
 // =============================================
 
 let userPos = null;
 let userHeading = 0;
 let surfaceData = null;
+let renderRadius = 2000;
+let testMode = false;
+let anchorPos = null; // {lat, lon} where surfaces are placed
 let scene = null;
+let surfacesEntity = null;
+
+// Color per surface type
+const SURFACE_COLORS = {
+  'inner horizontal': 0x3b82f6,
+  'conical':          0x8b5cf6,
+  'approach':         0x22c55e,
+  'take-off':         0xf59e0b,
+  'takeoff':          0xf59e0b,
+  'transitional':     0xec4899,
+  'default':          0x94a3b8
+};
+
+function getSurfaceColor(name) {
+  if (!name) return SURFACE_COLORS.default;
+  const lower = name.toLowerCase();
+  for (const key in SURFACE_COLORS) {
+    if (lower.includes(key)) return SURFACE_COLORS[key];
+  }
+  return SURFACE_COLORS.default;
+}
 
 // ----- UI helpers -----
 function setStatus(html) {
-  document.getElementById('status').innerHTML = html;
+  const el = document.getElementById('status');
+  if (el) el.innerHTML = html;
 }
 
 function showAR() {
   document.getElementById('file-input').style.display = 'none';
   document.getElementById('ui').style.display = 'block';
-  document.getElementById('legend').style.display = 'block';
+  document.getElementById('legend').style.display = 'flex';
   document.getElementById('scene').style.display = 'block';
   scene = document.querySelector('a-scene');
+  surfacesEntity = document.getElementById('surfaces');
   startStatusLoop();
 }
 
 // ----- File loading -----
-document.getElementById('geojson-file').addEventListener('change', (e) => {
-  const file = e.target.files[0];
-  if (!file) return;
+function loadFile() {
+  const fileInput = document.getElementById('geojson-file');
+  const file = fileInput.files[0];
+  if (!file) {
+    alert('กรุณาเลือกไฟล์ GeoJSON');
+    return;
+  }
+  renderRadius = parseInt(document.getElementById('render-radius').value) || 2000;
+  testMode = document.getElementById('test-mode').checked;
+
   const reader = new FileReader();
   reader.onload = (evt) => {
     try {
       surfaceData = JSON.parse(evt.target.result);
       console.log('Loaded GeoJSON:', surfaceData);
+      console.log('Features:', surfaceData.features.length);
       showAR();
       waitForGPSThenRender();
     } catch (err) {
@@ -38,39 +72,6 @@ document.getElementById('geojson-file').addEventListener('change', (e) => {
     }
   };
   reader.readAsText(file);
-});
-
-function loadDemo() {
-  // Demo: create a simple inclined surface around current location
-  navigator.geolocation.getCurrentPosition((pos) => {
-    const lat = pos.coords.latitude;
-    const lon = pos.coords.longitude;
-    const baseAlt = pos.coords.altitude || 50;
-
-    // 100m x 100m grid, sloping up at 2% (typical OLS-like)
-    const offset = 0.0009; // ~100 m
-    surfaceData = {
-      type: 'FeatureCollection',
-      features: [{
-        type: 'Feature',
-        properties: { name: 'Demo Slope Surface', slope_pct: 2 },
-        geometry: {
-          type: 'Polygon',
-          coordinates: [[
-            [lon - offset, lat - offset, baseAlt],
-            [lon + offset, lat - offset, baseAlt],
-            [lon + offset, lat + offset, baseAlt + 4],
-            [lon - offset, lat + offset, baseAlt + 4],
-            [lon - offset, lat - offset, baseAlt]
-          ]]
-        }
-      }]
-    };
-    showAR();
-    waitForGPSThenRender();
-  }, (err) => {
-    alert('ไม่สามารถอ่านตำแหน่งได้: ' + err.message);
-  }, { enableHighAccuracy: true });
 }
 
 // ----- GPS handling -----
@@ -85,7 +86,7 @@ function waitForGPSThenRender() {
       altAcc: pos.coords.altitudeAccuracy
     };
     if (!window._rendered) {
-      renderSurface();
+      decideAnchorAndRender();
       window._rendered = true;
     }
   }, (err) => {
@@ -93,180 +94,266 @@ function waitForGPSThenRender() {
   }, { enableHighAccuracy: true, maximumAge: 0, timeout: 30000 });
 }
 
-// ----- Compass -----
-window.addEventListener('deviceorientationabsolute', (e) => {
-  if (e.alpha != null) userHeading = 360 - e.alpha;
-}, true);
-window.addEventListener('deviceorientation', (e) => {
-  if (e.webkitCompassHeading) userHeading = e.webkitCompassHeading;
-  else if (e.alpha != null && !window._hasAbsolute) userHeading = 360 - e.alpha;
-});
+// Decide where to anchor surfaces
+function decideAnchorAndRender() {
+  if (testMode) {
+    // Test mode: shift entire surface so its centroid sits at user location
+    const centroid = computeFeaturesCentroid(surfaceData);
+    if (centroid) {
+      const shiftLat = userPos.lat - centroid.lat;
+      const shiftLon = userPos.lon - centroid.lon;
+      anchorPos = { lat: userPos.lat, lon: userPos.lon };
+      console.log(`Test mode: shifting surfaces by ${shiftLat}, ${shiftLon}`);
+      shiftAllCoords(surfaceData, shiftLat, shiftLon);
+    } else {
+      anchorPos = { lat: userPos.lat, lon: userPos.lon };
+    }
+  } else {
+    // Real mode: anchor at user position, surfaces at their real geo coords
+    anchorPos = { lat: userPos.lat, lon: userPos.lon };
+  }
 
-// ----- Render surface as A-Frame entities -----
-function renderSurface() {
-  if (!surfaceData || !scene) return;
+  // Set anchor entity to user's position
+  const anchor = document.getElementById('anchor');
+  anchor.setAttribute('gps-entity-place',
+    `latitude: ${anchorPos.lat}; longitude: ${anchorPos.lon}`);
 
-  setStatus('กำลัง render surface...');
+  renderSurfaces();
+}
+
+function computeFeaturesCentroid(geojson) {
+  let sumLat = 0, sumLon = 0, n = 0;
+  function walk(c) {
+    if (typeof c[0] === 'number') {
+      sumLon += c[0]; sumLat += c[1]; n++;
+    } else {
+      c.forEach(walk);
+    }
+  }
+  geojson.features.forEach(f => walk(f.geometry.coordinates));
+  if (n === 0) return null;
+  return { lat: sumLat/n, lon: sumLon/n };
+}
+
+function shiftAllCoords(geojson, dLat, dLon) {
+  function walk(c) {
+    if (typeof c[0] === 'number') {
+      c[0] += dLon;
+      c[1] += dLat;
+    } else {
+      c.forEach(walk);
+    }
+  }
+  geojson.features.forEach(f => walk(f.geometry.coordinates));
+}
+
+// ----- Lat/Lon to local ENU (East-North-Up) meters relative to anchor -----
+function llToEnu(lat, lon, alt) {
+  const R = 6378137;
+  const dLat = (lat - anchorPos.lat) * Math.PI / 180;
+  const dLon = (lon - anchorPos.lon) * Math.PI / 180;
+  const refLatRad = anchorPos.lat * Math.PI / 180;
+  const east  = dLon * R * Math.cos(refLatRad);
+  const north = dLat * R;
+  const up = (alt || 0) - (userPos.alt || 0);
+  // A-Frame uses X=east, Y=up, Z=-north (right-handed)
+  return { x: east, y: up, z: -north };
+}
+
+// Distance from anchor in meters
+function horizDistFromAnchor(lat, lon) {
+  const R = 6378137;
+  const dLat = (lat - anchorPos.lat) * Math.PI / 180;
+  const dLon = (lon - anchorPos.lon) * Math.PI / 180;
+  const refLatRad = anchorPos.lat * Math.PI / 180;
+  const east  = dLon * R * Math.cos(refLatRad);
+  const north = dLat * R;
+  return Math.sqrt(east*east + north*north);
+}
+
+// ----- Main renderer -----
+function renderSurfaces() {
+  if (!surfaceData) return;
+  setStatus('กำลังสร้าง mesh...');
+
+  // Wait for THREE to be ready (A-Frame initializes it)
+  if (!window.THREE || !scene.object3D) {
+    setTimeout(renderSurfaces, 200);
+    return;
+  }
+
+  let polyCount = 0;
+  let totalTris = 0;
 
   surfaceData.features.forEach((feat, idx) => {
+    const name = feat.properties?.name || `Feature ${idx}`;
+    const color = getSurfaceColor(name);
     const geom = feat.geometry;
 
+    let polygons = []; // each polygon: [outer_ring, hole1, hole2, ...]
     if (geom.type === 'Polygon') {
-      renderPolygon(geom.coordinates[0], idx, feat.properties);
+      polygons = [geom.coordinates];
     } else if (geom.type === 'MultiPolygon') {
-      geom.coordinates.forEach((poly, j) => {
-        renderPolygon(poly[0], idx + '-' + j, feat.properties);
-      });
-    } else if (geom.type === 'Point') {
-      renderPoint(geom.coordinates, idx, feat.properties);
-    }
-  });
-
-  setStatus('Render เสร็จ ✓');
-}
-
-function renderPolygon(coords, id, props) {
-  // Place vertices as small spheres + lines connecting them
-  // For a real surface, you'd build a triangulated mesh
-  coords.forEach((c, i) => {
-    const [lon, lat, alt] = c;
-    const entity = document.createElement('a-entity');
-    entity.setAttribute('gps-entity-place', `latitude: ${lat}; longitude: ${lon}`);
-    entity.setAttribute('geometry', 'primitive: sphere; radius: 1.5');
-    entity.setAttribute('material', 'color: #3b82f6; opacity: 0.8; transparent: true');
-    entity.setAttribute('position', `0 ${alt || 0} 0`);
-
-    // Label
-    const label = document.createElement('a-text');
-    label.setAttribute('value', `V${i}\nZ=${(alt || 0).toFixed(1)}m`);
-    label.setAttribute('align', 'center');
-    label.setAttribute('color', 'white');
-    label.setAttribute('scale', '8 8 8');
-    label.setAttribute('position', '0 3 0');
-    label.setAttribute('look-at', '[gps-camera]');
-    entity.appendChild(label);
-
-    scene.appendChild(entity);
-  });
-
-  // Center marker showing surface name
-  const center = polygonCentroid(coords);
-  const centerEnt = document.createElement('a-entity');
-  centerEnt.setAttribute('gps-entity-place', `latitude: ${center[1]}; longitude: ${center[0]}`);
-  centerEnt.setAttribute('geometry', 'primitive: box; width: 2; height: 0.2; depth: 2');
-  centerEnt.setAttribute('material', 'color: #2563eb; opacity: 0.5; transparent: true');
-  centerEnt.setAttribute('position', `0 ${center[2] || 0} 0`);
-
-  const nameLabel = document.createElement('a-text');
-  nameLabel.setAttribute('value', props.name || `Surface ${id}`);
-  nameLabel.setAttribute('align', 'center');
-  nameLabel.setAttribute('color', '#fbbf24');
-  nameLabel.setAttribute('scale', '15 15 15');
-  nameLabel.setAttribute('position', '0 5 0');
-  nameLabel.setAttribute('look-at', '[gps-camera]');
-  centerEnt.appendChild(nameLabel);
-
-  scene.appendChild(centerEnt);
-}
-
-function renderPoint(coord, id, props) {
-  const [lon, lat, alt] = coord;
-  const entity = document.createElement('a-entity');
-  entity.setAttribute('gps-entity-place', `latitude: ${lat}; longitude: ${lon}`);
-  entity.setAttribute('geometry', 'primitive: cylinder; radius: 0.5; height: 5');
-  entity.setAttribute('material', 'color: #22c55e');
-  entity.setAttribute('position', `0 ${(alt || 0) + 2.5} 0`);
-  scene.appendChild(entity);
-}
-
-function polygonCentroid(coords) {
-  let x = 0, y = 0, z = 0;
-  const n = coords.length - 1; // last = first
-  for (let i = 0; i < n; i++) {
-    x += coords[i][0];
-    y += coords[i][1];
-    z += coords[i][2] || 0;
-  }
-  return [x / n, y / n, z / n];
-}
-
-// ----- Live status loop -----
-function startStatusLoop() {
-  setInterval(() => {
-    if (!userPos) return;
-
-    const accClass = userPos.acc < 5 ? 'good' : userPos.acc < 15 ? 'warn' : 'bad';
-    const altAccClass = !userPos.altAcc ? 'bad' : userPos.altAcc < 10 ? 'good' : userPos.altAcc < 20 ? 'warn' : 'bad';
-
-    let html = `
-      <div class="row"><span class="label">Lat</span><span>${userPos.lat.toFixed(6)}</span></div>
-      <div class="row"><span class="label">Lon</span><span>${userPos.lon.toFixed(6)}</span></div>
-      <div class="row"><span class="label">Alt</span><span>${userPos.alt ? userPos.alt.toFixed(1) + ' m' : 'N/A'}</span></div>
-      <div class="row"><span class="label">H-acc</span><span class="${accClass}">±${userPos.acc.toFixed(1)} m</span></div>
-      <div class="row"><span class="label">V-acc</span><span class="${altAccClass}">${userPos.altAcc ? '±' + userPos.altAcc.toFixed(1) + ' m' : 'N/A'}</span></div>
-      <div class="row"><span class="label">Heading</span><span>${userHeading.toFixed(0)}°</span></div>
-    `;
-
-    // Compare to nearest surface point
-    if (surfaceData && userPos.alt != null) {
-      const result = checkSurfaceClearance(userPos);
-      if (result) {
-        const cls = result.clearance > 5 ? 'good' : result.clearance > 0 ? 'warn' : 'bad';
-        const status = result.clearance > 0 ? '✓ ใต้ surface' : '⚠ เกิน surface';
-        html += `
-          <hr style="border-color:#444;margin:6px 0">
-          <div class="row"><span class="label">Surface Z</span><span>${result.surfaceAlt.toFixed(1)} m</span></div>
-          <div class="row"><span class="label">Clearance</span><span class="${cls}">${result.clearance.toFixed(1)} m</span></div>
-          <div class="row"><span class="label">Status</span><span class="${cls}">${status}</span></div>
-        `;
-      }
+      polygons = geom.coordinates;
+    } else {
+      return;
     }
 
-    setStatus(html);
-  }, 500);
-}
-
-// ----- Surface clearance check (simple: nearest vertex) -----
-function checkSurfaceClearance(pos) {
-  if (!surfaceData) return null;
-  let nearest = null;
-  let minDist = Infinity;
-
-  surfaceData.features.forEach(feat => {
-    const coords = feat.geometry.type === 'Polygon'
-      ? feat.geometry.coordinates[0]
-      : null;
-    if (!coords) return;
-    coords.forEach(c => {
-      const d = haversine(pos.lat, pos.lon, c[1], c[0]);
-      if (d < minDist) {
-        minDist = d;
-        nearest = c;
+    polygons.forEach(rings => {
+      const mesh = createPolygonMesh(rings, color, name);
+      if (mesh) {
+        surfacesEntity.object3D.add(mesh);
+        polyCount++;
+        totalTris += mesh.userData.triCount || 0;
       }
     });
   });
 
-  if (!nearest) return null;
-  const surfaceAlt = nearest[2] || 0;
-  return {
-    surfaceAlt,
-    clearance: surfaceAlt - pos.alt,
-    distance: minDist
-  };
+  console.log(`Rendered ${polyCount} polygons, ~${totalTris} triangles`);
+  setStatus(`✓ Render เสร็จ: ${polyCount} polygons, ${totalTris} tris`);
 }
 
-function haversine(lat1, lon1, lat2, lon2) {
-  const R = 6371000;
-  const toRad = d => d * Math.PI / 180;
-  const dLat = toRad(lat2 - lat1);
-  const dLon = toRad(lon2 - lon1);
-  const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
-  return 2 * R * Math.asin(Math.sqrt(a));
+// Create a Three.js mesh from a polygon (outer ring + optional holes)
+function createPolygonMesh(rings, color, name) {
+  const outer = rings[0];
+  if (!outer || outer.length < 3) return null;
+
+  // Check if any vertex is within renderRadius
+  let inRange = false;
+  for (const v of outer) {
+    if (horizDistFromAnchor(v[1], v[0]) < renderRadius) {
+      inRange = true;
+      break;
+    }
+  }
+  if (!inRange) {
+    console.log(`Skipping ${name}: out of range`);
+    return null;
+  }
+
+  // Convert rings to flat ENU coords for earcut
+  // earcut expects: [x0, y0, x1, y1, ...] flat array (2D for triangulation)
+  // We keep the 3D position separately
+  const flatCoords2D = [];
+  const positions3D = [];
+  const holeIndices = [];
+
+  let vertIdx = 0;
+  rings.forEach((ring, ringIdx) => {
+    if (ringIdx > 0) holeIndices.push(vertIdx);
+    // Skip last vertex if it's a duplicate of the first (closed ring)
+    const lastIdx = (ring.length > 1 &&
+      ring[0][0] === ring[ring.length-1][0] &&
+      ring[0][1] === ring[ring.length-1][1])
+      ? ring.length - 1 : ring.length;
+
+    for (let i = 0; i < lastIdx; i++) {
+      const [lon, lat, alt] = ring[i];
+      const enu = llToEnu(lat, lon, alt);
+      flatCoords2D.push(enu.x, enu.z); // use x, z for 2D triangulation (top-down)
+      positions3D.push(enu.x, enu.y, enu.z);
+      vertIdx++;
+    }
+  });
+
+  // Triangulate
+  const triangles = earcut(flatCoords2D, holeIndices, 2);
+  if (triangles.length === 0) {
+    console.log(`Triangulation failed for ${name}`);
+    return null;
+  }
+
+  // Build BufferGeometry
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions3D, 3));
+  geometry.setIndex(triangles);
+  geometry.computeVertexNormals();
+
+  // Material — semi-transparent, double-sided
+  const material = new THREE.MeshBasicMaterial({
+    color: color,
+    transparent: true,
+    opacity: 0.35,
+    side: THREE.DoubleSide,
+    depthWrite: false
+  });
+
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.userData.name = name;
+  mesh.userData.triCount = triangles.length / 3;
+
+  // Wireframe outline overlay for visibility
+  const wireGeom = new THREE.BufferGeometry();
+  wireGeom.setAttribute('position', new THREE.Float32BufferAttribute(positions3D, 3));
+  wireGeom.setIndex(triangles);
+  const wireMat = new THREE.MeshBasicMaterial({
+    color: color,
+    wireframe: true,
+    transparent: true,
+    opacity: 0.6
+  });
+  const wireMesh = new THREE.Mesh(wireGeom, wireMat);
+  mesh.add(wireMesh);
+
+  // Outline of the outer ring (thick line at the edge)
+  const outlinePoints = [];
+  const ringEnd = (outer.length > 1 &&
+    outer[0][0] === outer[outer.length-1][0] &&
+    outer[0][1] === outer[outer.length-1][1])
+    ? outer.length : outer.length;
+  for (let i = 0; i < ringEnd; i++) {
+    const [lon, lat, alt] = outer[i % outer.length];
+    const enu = llToEnu(lat, lon, alt);
+    outlinePoints.push(new THREE.Vector3(enu.x, enu.y, enu.z));
+  }
+  // close
+  const first = outer[0];
+  const enu0 = llToEnu(first[1], first[0], first[2]);
+  outlinePoints.push(new THREE.Vector3(enu0.x, enu0.y, enu0.z));
+
+  const lineGeom = new THREE.BufferGeometry().setFromPoints(outlinePoints);
+  const lineMat = new THREE.LineBasicMaterial({ color: color, linewidth: 3 });
+  const line = new THREE.Line(lineGeom, lineMat);
+  mesh.add(line);
+
+  return mesh;
 }
 
-// Request iOS permission for device orientation if needed
-if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+// ----- Compass -----
+let hasAbsolute = false;
+window.addEventListener('deviceorientationabsolute', (e) => {
+  if (e.alpha != null) { userHeading = 360 - e.alpha; hasAbsolute = true; }
+}, true);
+window.addEventListener('deviceorientation', (e) => {
+  if (e.webkitCompassHeading) userHeading = e.webkitCompassHeading;
+  else if (e.alpha != null && !hasAbsolute) userHeading = 360 - e.alpha;
+});
+
+// iOS permission
+if (typeof DeviceOrientationEvent !== 'undefined' &&
+    typeof DeviceOrientationEvent.requestPermission === 'function') {
   document.body.addEventListener('click', () => {
     DeviceOrientationEvent.requestPermission();
   }, { once: true });
+}
+
+// ----- Status loop -----
+function startStatusLoop() {
+  setInterval(() => {
+    if (!userPos) return;
+    const accClass = userPos.acc < 5 ? 'good' : userPos.acc < 15 ? 'warn' : 'bad';
+    const altAccClass = !userPos.altAcc ? 'bad' : userPos.altAcc < 10 ? 'good' : 'warn';
+
+    let html = `
+      <div class="row"><span class="label">Lat</span><span>${userPos.lat.toFixed(6)}</span></div>
+      <div class="row"><span class="label">Lon</span><span>${userPos.lon.toFixed(6)}</span></div>
+      <div class="row"><span class="label">Alt MSL</span><span>${userPos.alt ? userPos.alt.toFixed(1) + ' m' : 'N/A'}</span></div>
+      <div class="row"><span class="label">H-acc</span><span class="${accClass}">±${userPos.acc.toFixed(1)} m</span></div>
+      <div class="row"><span class="label">V-acc</span><span class="${altAccClass}">${userPos.altAcc ? '±' + userPos.altAcc.toFixed(1) + ' m' : 'N/A'}</span></div>
+      <div class="row"><span class="label">Heading</span><span>${userHeading.toFixed(0)}°</span></div>
+      <div class="row"><span class="label">Mode</span><span>${testMode ? 'TEST (centered)' : 'REAL geo'}</span></div>
+      <div class="row"><span class="label">Render R</span><span>${renderRadius} m</span></div>
+    `;
+    setStatus(html);
+  }, 500);
 }
