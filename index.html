@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>AR OLS Viewer v5 (Vanilla)</title>
+  <title>AR OLS Viewer v6</title>
 
   <script src="https://cdn.jsdelivr.net/npm/three@0.150.0/build/three.min.js"></script>
   <script src="https://unpkg.com/earcut@2.2.4/dist/earcut.min.js"></script>
@@ -12,29 +12,37 @@
     * { box-sizing: border-box; }
     html, body { margin: 0; padding: 0; overflow: hidden; height: 100%; background: #000; font-family: -apple-system, sans-serif; }
 
-    /* Camera video as background */
     #cam-video {
-      position: fixed;
-      top: 0; left: 0;
+      position: fixed; top: 0; left: 0;
       width: 100%; height: 100%;
-      object-fit: cover;
-      z-index: 1;
+      object-fit: cover; z-index: 1;
+    }
+    #three-canvas {
+      position: fixed; top: 0; left: 0;
+      width: 100%; height: 100%;
+      z-index: 2; pointer-events: none;
     }
 
-    /* Three.js canvas overlay */
-    #three-canvas {
-      position: fixed;
-      top: 0; left: 0;
-      width: 100%; height: 100%;
-      z-index: 2;
-      pointer-events: none;
+    /* Crosshair */
+    #crosshair {
+      position: fixed; top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      width: 40px; height: 40px;
+      pointer-events: none; z-index: 90;
+      display: none;
     }
+    #crosshair::before, #crosshair::after {
+      content: ''; position: absolute;
+      background: rgba(74, 222, 128, 0.9);
+    }
+    #crosshair::before { top: 50%; left: 0; right: 0; height: 1px; }
+    #crosshair::after { left: 50%; top: 0; bottom: 0; width: 1px; }
 
     #ui {
       position: fixed; top: 0; left: 0; right: 0;
       background: rgba(0,0,0,0.78); color: white;
       padding: 6px 10px; z-index: 100;
-      font-size: 11px; max-height: 25vh; overflow-y: auto;
+      font-size: 11px; max-height: 35vh; overflow-y: auto;
     }
     #ui h3 { margin: 0 0 3px 0; font-size: 12px; }
     #status { font-family: monospace; font-size: 10px; line-height: 1.4; }
@@ -46,50 +54,55 @@
       position: fixed; top: 50%; left: 50%;
       transform: translate(-50%, -50%);
       background: rgba(20,20,30,0.97); color: white;
-      padding: 18px; border-radius: 14px;
+      padding: 16px; border-radius: 14px;
       z-index: 200; text-align: center;
-      width: 90%; max-width: 360px;
+      width: 92%; max-width: 380px;
       box-shadow: 0 10px 40px rgba(0,0,0,0.6);
-      max-height: 92vh; overflow-y: auto;
+      max-height: 94vh; overflow-y: auto;
     }
-    #file-input h3 { margin: 0 0 8px 0; font-size: 16px; }
+    #file-input h3 { margin: 0 0 6px 0; font-size: 15px; }
     #file-input button {
-      display: block; width: 100%; padding: 11px; margin: 6px 0;
+      display: block; width: 100%; padding: 10px; margin: 5px 0;
       background: #2563eb; color: white; border: none;
       border-radius: 8px; font-size: 13px; cursor: pointer;
       font-weight: 600;
     }
     #file-input button:disabled { background: #444; color: #888; }
-    #file-input button.start-btn { background: #16a34a; font-size: 15px; padding: 13px; }
+    #file-input button.start-btn { background: #16a34a; font-size: 14px; padding: 12px; }
     #file-input button.start-btn:disabled { background: #444; }
     #file-input .file-label {
-      display: block; width: 100%; padding: 12px; margin: 6px 0;
+      display: block; width: 100%; padding: 10px; margin: 5px 0;
       background: #1e40af; color: white; border: 2px dashed #60a5fa;
-      border-radius: 8px; font-size: 13px; cursor: pointer;
+      border-radius: 8px; font-size: 12px; cursor: pointer;
       font-weight: 500;
     }
     .file-label.has-file { background: #166534 !important; border-color: #4ade80 !important; }
     #file-input input[type=file] { display: none; }
-    #file-status {
-      font-size: 10px; padding: 6px;
+    .file-status {
+      font-size: 10px; padding: 5px;
       background: rgba(0,0,0,0.4); border-radius: 6px;
-      margin: 6px 0; min-height: 16px;
-      font-family: monospace;
+      margin: 4px 0; min-height: 14px;
+      font-family: monospace; text-align: left;
     }
     .opts {
       display: flex; gap: 6px; align-items: center;
-      justify-content: space-between; margin: 6px 0; font-size: 11px;
-      padding: 6px 8px; background: rgba(255,255,255,0.05); border-radius: 6px;
+      justify-content: space-between; margin: 5px 0; font-size: 11px;
+      padding: 5px 8px; background: rgba(255,255,255,0.05); border-radius: 6px;
     }
     .opts input[type=number] {
-      width: 70px; padding: 5px; border-radius: 6px;
+      width: 70px; padding: 4px; border-radius: 6px;
       border: 1px solid #555; background: #222; color: white; font-size: 11px;
     }
     .opts label.checkbox {
       display: flex; align-items: center; gap: 6px;
-      width: 100%; cursor: pointer; font-size: 12px;
+      width: 100%; cursor: pointer; font-size: 11px;
     }
     .opts input[type=checkbox] { width: 16px; height: 16px; }
+    .section-header {
+      font-size: 11px; font-weight: 600; color: #60a5fa;
+      margin: 8px 0 2px 0; text-align: left;
+      border-bottom: 1px solid #334155; padding-bottom: 2px;
+    }
 
     #minimap-container {
       position: fixed;
@@ -113,7 +126,7 @@
     .swatch { display: inline-block; width: 9px; height: 9px; margin-right: 3px; vertical-align: middle; border-radius: 2px; }
 
     #log {
-      position: fixed; top: 28%; left: 8px; right: 8px;
+      position: fixed; top: 36%; left: 8px; right: 8px;
       background: rgba(0,0,0,0.88); color: #4ade80;
       padding: 8px; border-radius: 8px;
       font-family: monospace; font-size: 9px;
@@ -122,69 +135,91 @@
     }
 
     #floating-ctrl {
-      position: fixed; right: 8px; top: 28%;
+      position: fixed; right: 8px; top: 36%;
       display: none;
-      flex-direction: column; gap: 6px;
+      flex-direction: column; gap: 5px;
       z-index: 110;
     }
     #floating-ctrl button {
-      width: 44px; height: 44px;
+      width: 42px; height: 42px;
       border-radius: 50%;
       border: none;
       background: rgba(37, 99, 235, 0.9);
       color: white;
-      font-size: 18px;
+      font-size: 16px;
       box-shadow: 0 2px 6px rgba(0,0,0,0.5);
+    }
+    #floating-ctrl button.cal { background: rgba(245, 158, 11, 0.9); }
+
+    /* Aim info under crosshair */
+    #aim-info {
+      position: fixed; top: 50%; left: 50%;
+      transform: translate(-50%, calc(-50% + 30px));
+      background: rgba(0,0,0,0.75);
+      color: #4ade80;
+      padding: 4px 10px;
+      border-radius: 6px;
+      font-family: monospace;
+      font-size: 10px;
+      z-index: 90;
+      pointer-events: none;
+      display: none;
+      white-space: nowrap;
     }
   </style>
 </head>
 <body>
 
-<!-- Camera background -->
 <video id="cam-video" autoplay playsinline muted></video>
-
-<!-- Three.js canvas -->
 <canvas id="three-canvas"></canvas>
 
-<div id="file-input">
-  <h3>AR OLS Viewer v5</h3>
-  <p style="font-size:10px;opacity:0.7;margin:2px 0">Vanilla Three.js + getUserMedia</p>
+<div id="crosshair"></div>
+<div id="aim-info"></div>
 
-  <label for="geojson-file" class="file-label" id="file-label">
-    📂 แตะเพื่อเลือกไฟล์
+<div id="file-input">
+  <h3>AR OLS Viewer v6</h3>
+  <p style="font-size:9px;opacity:0.7;margin:2px 0">Three.js + DTM ground sampling</p>
+
+  <div class="section-header">1. OLS Surface (จำเป็น)</div>
+  <label for="geojson-file" class="file-label" id="ols-label">
+    📂 OLS GeoJSON
   </label>
   <input type="file" id="geojson-file" accept=".geojson,.json,application/json">
+  <div id="ols-status" class="file-status">ยังไม่ได้เลือก</div>
 
-  <div id="file-status">ยังไม่ได้เลือกไฟล์</div>
+  <div class="section-header">2. DTM (แนะนำ)</div>
+  <label for="dtm-header-file" class="file-label" id="dtm-header-label">
+    📂 DTM header (.dtm.json)
+  </label>
+  <input type="file" id="dtm-header-file" accept=".json">
+  <label for="dtm-bin-file" class="file-label" id="dtm-bin-label">
+    📂 DTM binary (.dtm)
+  </label>
+  <input type="file" id="dtm-bin-file" accept=".dtm,application/octet-stream">
+  <div id="dtm-status" class="file-status">ไม่บังคับ - ถ้าไม่ใส่จะใช้ค่าด้านล่าง</div>
 
+  <div class="opts">
+    <span>Manual ground MSL:</span>
+    <span><input type="number" id="manual-ground" value="30" step="1"> m</span>
+  </div>
+
+  <div class="section-header">3. ตัวเลือก</div>
   <div class="opts">
     <span>รัศมี:</span>
     <span><input type="number" id="render-radius" value="8000" min="200" max="20000" step="500"> m</span>
   </div>
 
   <div class="opts">
-    <span>Surface offset Y:</span>
-    <span><input type="number" id="surface-offset" value="0" min="-500" max="500" step="5"> m</span>
-  </div>
-
-  <div class="opts">
-    <label class="checkbox">
-      <input type="checkbox" id="auto-fit" checked>
-      <span>Auto-fit สูง</span>
-    </label>
-  </div>
-
-  <div class="opts">
     <label class="checkbox">
       <input type="checkbox" id="debug-markers" checked>
-      <span>Debug markers (N/S/E/W)</span>
+      <span>Debug markers (N/E/S/W)</span>
     </label>
   </div>
 
   <div class="opts">
     <label class="checkbox">
       <input type="checkbox" id="test-mode">
-      <span>โหมดทดสอบ</span>
+      <span>โหมดทดสอบ (วาง surface ที่ฉัน)</span>
     </label>
   </div>
 
@@ -193,13 +228,13 @@
   </button>
 
   <p style="font-size:9px;opacity:0.6;margin:4px 0">
-    อนุญาต Camera + Location + Motion sensors<br>
-    ครั้งแรก: หันหน้าไปทาง <b>เหนือ</b> ก่อนกดเริ่ม
+    หันหน้าไปทาง <b>เหนือ</b> ก่อนกดเริ่ม<br>
+    หมุนเลข 8 calibrate compass ก่อนเริ่ม
   </p>
 </div>
 
 <div id="ui" style="display:none">
-  <h3>AR OLS v5</h3>
+  <h3>AR OLS v6</h3>
   <div id="status">เริ่มต้น...</div>
 </div>
 
@@ -216,8 +251,12 @@
 </div>
 
 <div id="floating-ctrl">
-  <button onclick="adjustHeight(-10)">⬇</button>
-  <button onclick="adjustHeight(10)">⬆</button>
+  <button class="cal" onclick="adjustHeading(-5)" title="หมุน N ทางซ้าย 5°">⟲5</button>
+  <button class="cal" onclick="adjustHeading(-1)">⟲1</button>
+  <button class="cal" onclick="adjustHeading(1)">⟳1</button>
+  <button class="cal" onclick="adjustHeading(5)">⟳5</button>
+  <button onclick="adjustHeight(-5)">⬇</button>
+  <button onclick="adjustHeight(5)">⬆</button>
   <button onclick="toggleLog()">🔍</button>
 </div>
 

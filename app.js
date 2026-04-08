@@ -1,19 +1,23 @@
 // =============================================
-// AR OLS Surface Viewer v5
-// VANILLA: Three.js + getUserMedia + DeviceOrientation
-// No AR.js, no A-Frame — full control
+// AR OLS Surface Viewer v6
+// + DTM ground sampling for accurate elevation
+// + HUD: crosshair, aim info
+// + Compass calibration buttons
+// + No auto-fit — uses real MSL throughout
 // =============================================
 
 let userPos = null;
 let userHeading = 0;
-let userPitch = 0;
-let userRoll = 0;
 let surfaceData = null;
+let dtmHeader = null;
+let dtmData = null; // Int16Array
 let renderRadius = 8000;
 let testMode = false;
-let autoFit = true;
 let showDebugMarkers = true;
-let surfaceOffsetY = 0;
+let surfaceOffsetY = 0;        // manual Y offset (use ⬆⬇)
+let headingOffset = 0;          // manual heading correction (use ⟲⟳)
+let manualGroundMSL = 30;
+let userGroundMSL = null;       // sampled from DTM or manual
 let anchorPos = null;
 let allFeaturesEnu = [];
 
@@ -56,127 +60,223 @@ function toggleLog() {
   if (logEl) logEl.style.display = logEl.style.display === 'none' ? 'block' : 'none';
 }
 
-function setFileStatus(html, color = '#fbbf24') {
-  const el = document.getElementById('file-status');
-  if (el) { el.innerHTML = html; el.style.color = color; }
+function setStatus(html) {
+  const el = document.getElementById('status');
+  if (el) el.innerHTML = html;
+}
+
+// ============================================================
+// File loading
+// ============================================================
+let dtmHeaderLoaded = false;
+let dtmBinLoaded = false;
+
+function checkReadyToStart() {
+  document.getElementById('start-btn').disabled = !surfaceData;
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-  const fileInput = document.getElementById('geojson-file');
-  const fileLabel = document.getElementById('file-label');
-  const startBtn = document.getElementById('start-btn');
-
-  fileInput.addEventListener('change', (e) => {
+  // OLS file
+  document.getElementById('geojson-file').addEventListener('change', (e) => {
     const file = e.target.files[0];
-    if (!file) { setFileStatus('ยังไม่ได้เลือกไฟล์'); startBtn.disabled = true; return; }
-    setFileStatus(`โหลด: ${file.name}...`, '#fbbf24');
+    if (!file) return;
     const reader = new FileReader();
     reader.onload = (evt) => {
       try {
         surfaceData = JSON.parse(evt.target.result);
-        if (!surfaceData.features || !Array.isArray(surfaceData.features)) {
-          throw new Error('ไม่ใช่ FeatureCollection');
-        }
-        let totalVerts = 0;
-        function countV(c) {
-          if (typeof c[0] === 'number') return 1;
-          return c.reduce((s, x) => s + countV(x), 0);
-        }
-        surfaceData.features.forEach(f => totalVerts += countV(f.geometry.coordinates));
-        setFileStatus(
-          `✓ ${file.name}<br>${surfaceData.features.length} features, ${totalVerts} verts`,
-          '#4ade80'
-        );
-        fileLabel.classList.add('has-file');
-        fileLabel.textContent = `✓ ${file.name}`;
-        startBtn.disabled = false;
+        if (!surfaceData.features) throw new Error('ไม่ใช่ FeatureCollection');
+        let nv = 0;
+        function cv(c) { if (typeof c[0]==='number') return 1; return c.reduce((s,x)=>s+cv(x),0); }
+        surfaceData.features.forEach(f => nv += cv(f.geometry.coordinates));
+        document.getElementById('ols-status').innerHTML =
+          `<span style="color:#4ade80">✓ ${file.name}<br>${surfaceData.features.length} features, ${nv} verts</span>`;
+        document.getElementById('ols-label').classList.add('has-file');
+        document.getElementById('ols-label').textContent = `✓ OLS: ${file.name}`;
+        checkReadyToStart();
       } catch (err) {
-        setFileStatus(`✗ ${err.message}`, '#f87171');
-        startBtn.disabled = true;
+        document.getElementById('ols-status').innerHTML =
+          `<span style="color:#f87171">✗ ${err.message}</span>`;
       }
     };
     reader.readAsText(file);
   });
+
+  // DTM header
+  document.getElementById('dtm-header-file').addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        dtmHeader = JSON.parse(evt.target.result);
+        if (!dtmHeader.bbox || !dtmHeader.width || !dtmHeader.height) {
+          throw new Error('header ไม่ครบ');
+        }
+        dtmHeaderLoaded = true;
+        document.getElementById('dtm-header-label').classList.add('has-file');
+        document.getElementById('dtm-header-label').textContent = `✓ ${file.name}`;
+        updateDtmStatus();
+      } catch (err) {
+        document.getElementById('dtm-status').innerHTML =
+          `<span style="color:#f87171">✗ header: ${err.message}</span>`;
+      }
+    };
+    reader.readAsText(file);
+  });
+
+  // DTM binary
+  document.getElementById('dtm-bin-file').addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        const buf = evt.target.result;
+        dtmData = new Int16Array(buf);
+        dtmBinLoaded = true;
+        document.getElementById('dtm-bin-label').classList.add('has-file');
+        document.getElementById('dtm-bin-label').textContent = `✓ ${file.name} (${(buf.byteLength/1e6).toFixed(1)} MB)`;
+        updateDtmStatus();
+      } catch (err) {
+        document.getElementById('dtm-status').innerHTML =
+          `<span style="color:#f87171">✗ binary: ${err.message}</span>`;
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  });
 });
 
+function updateDtmStatus() {
+  const status = document.getElementById('dtm-status');
+  if (dtmHeaderLoaded && dtmBinLoaded) {
+    const expectedSize = dtmHeader.width * dtmHeader.height;
+    if (dtmData.length !== expectedSize) {
+      status.innerHTML = `<span style="color:#f87171">✗ ขนาดไม่ตรง: ${dtmData.length} vs ${expectedSize}</span>`;
+      return;
+    }
+    status.innerHTML =
+      `<span style="color:#4ade80">✓ DTM พร้อม<br>` +
+      `${dtmHeader.width}×${dtmHeader.height} cells<br>` +
+      `bbox: ${dtmHeader.bbox.south.toFixed(3)},${dtmHeader.bbox.west.toFixed(3)} → ${dtmHeader.bbox.north.toFixed(3)},${dtmHeader.bbox.east.toFixed(3)}` +
+      `</span>`;
+  } else if (dtmHeaderLoaded) {
+    status.innerHTML = '<span style="color:#fbbf24">รอไฟล์ binary...</span>';
+  } else {
+    status.innerHTML = '<span style="color:#fbbf24">รอ header...</span>';
+  }
+}
+
+// ============================================================
+// DTM sampling
+// ============================================================
+function sampleDTM(lat, lon) {
+  if (!dtmHeader || !dtmData) return null;
+  const { bbox, width, height, nodata } = dtmHeader;
+
+  if (lat < bbox.south || lat > bbox.north || lon < bbox.west || lon > bbox.east) {
+    return null;
+  }
+
+  // Convert lat/lon to fractional pixel index
+  // Note: DTM is row-major with row 0 = NORTH (highest lat)
+  const fx = (lon - bbox.west) / (bbox.east - bbox.west) * (width - 1);
+  const fy = (bbox.north - lat) / (bbox.north - bbox.south) * (height - 1);
+
+  const x0 = Math.floor(fx), x1 = Math.min(x0 + 1, width - 1);
+  const y0 = Math.floor(fy), y1 = Math.min(y0 + 1, height - 1);
+  const dx = fx - x0, dy = fy - y0;
+
+  function get(x, y) {
+    const v = dtmData[y * width + x];
+    return v === nodata ? null : v;
+  }
+
+  const v00 = get(x0, y0);
+  const v10 = get(x1, y0);
+  const v01 = get(x0, y1);
+  const v11 = get(x1, y1);
+
+  // If any nodata, return mean of valid neighbors
+  const valids = [v00, v10, v01, v11].filter(v => v !== null);
+  if (valids.length === 0) return null;
+  if (valids.length < 4) return valids.reduce((a,b)=>a+b, 0) / valids.length;
+
+  // Bilinear interpolation
+  const v0 = v00 * (1 - dx) + v10 * dx;
+  const v1 = v01 * (1 - dx) + v11 * dx;
+  return v0 * (1 - dy) + v1 * dy;
+}
+
+// ============================================================
+// Start AR
+// ============================================================
 async function startAR() {
   if (!surfaceData) return;
   renderRadius = parseInt(document.getElementById('render-radius').value) || 8000;
   testMode = document.getElementById('test-mode').checked;
-  autoFit = document.getElementById('auto-fit').checked;
   showDebugMarkers = document.getElementById('debug-markers').checked;
-  surfaceOffsetY = parseInt(document.getElementById('surface-offset').value) || 0;
+  manualGroundMSL = parseFloat(document.getElementById('manual-ground').value) || 30;
 
-  showLog('=== AR v5 (vanilla Three.js) ===');
+  showLog('=== AR v6 ===');
   showLog(`Mode: ${testMode ? 'TEST' : 'REAL'}, Radius: ${renderRadius}m`);
+  showLog(`DTM: ${dtmData ? 'loaded' : 'NOT loaded (using manual ground)'}`);
 
   document.getElementById('file-input').style.display = 'none';
   document.getElementById('ui').style.display = 'block';
   document.getElementById('legend').style.display = 'flex';
   document.getElementById('minimap-container').style.display = 'block';
   document.getElementById('floating-ctrl').style.display = 'flex';
+  document.getElementById('crosshair').style.display = 'block';
+  document.getElementById('aim-info').style.display = 'block';
 
-  // Request iOS sensor permission
+  // iOS sensor permission
   if (typeof DeviceOrientationEvent !== 'undefined' &&
       typeof DeviceOrientationEvent.requestPermission === 'function') {
     try {
-      const perm = await DeviceOrientationEvent.requestPermission();
-      showLog(`iOS sensor: ${perm}`);
+      await DeviceOrientationEvent.requestPermission();
     } catch (e) {}
   }
 
-  // Start camera
+  // Camera
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
       audio: false
     });
-    const video = document.getElementById('cam-video');
-    video.srcObject = stream;
-    await video.play();
-    showLog(`Camera: ${video.videoWidth}x${video.videoHeight}`);
+    document.getElementById('cam-video').srcObject = stream;
+    await document.getElementById('cam-video').play();
   } catch (err) {
     showLog('Camera error: ' + err.message, true);
-    alert('ไม่สามารถเปิดกล้อง: ' + err.message);
     return;
   }
 
-  // Setup Three.js
   initThree();
   startSensors();
   startStatusLoop();
   startMinimapLoop();
+  startAimInfoLoop();
   waitForGPSThenRender();
   animate();
 }
 
 function initThree() {
-  const canvas = document.getElementById('three-canvas');
   renderer = new THREE.WebGLRenderer({
-    canvas: canvas,
-    alpha: true,
-    antialias: true,
-    logarithmicDepthBuffer: true
+    canvas: document.getElementById('three-canvas'),
+    alpha: true, antialias: true, logarithmicDepthBuffer: true
   });
   renderer.setPixelRatio(window.devicePixelRatio);
   renderer.setSize(window.innerWidth, window.innerHeight);
-  renderer.setClearColor(0x000000, 0); // transparent
+  renderer.setClearColor(0x000000, 0);
 
   scene = new THREE.Scene();
-
-  camera = new THREE.PerspectiveCamera(
-    70,
-    window.innerWidth / window.innerHeight,
-    0.1,
-    100000
-  );
-  camera.position.set(0, 1.6, 0); // eye level
+  camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 100000);
+  // Camera at origin (0,0,0). We'll position the world relative to this.
+  // Camera Y = 0 means "user's eye level".
+  camera.position.set(0, 0, 0);
 
   worldGroup = new THREE.Group();
   scene.add(worldGroup);
-
-  const light = new THREE.AmbientLight(0xffffff, 1.0);
-  scene.add(light);
+  scene.add(new THREE.AmbientLight(0xffffff, 1.0));
 
   window.addEventListener('resize', () => {
     camera.aspect = window.innerWidth / window.innerHeight;
@@ -189,69 +289,56 @@ function initThree() {
 
 function animate() {
   requestAnimationFrame(animate);
-
-  // Update camera rotation from device orientation
-  // Convert device orientation to Three.js camera rotation
-  // Note: this is a simplified conversion that works well in landscape & portrait
-  if (deviceOrientation) {
-    updateCameraFromOrientation();
+  if (deviceOrientation) updateCameraFromOrientation();
+  // Apply heading offset by rotating world group around Y
+  if (worldGroup) {
+    worldGroup.rotation.y = headingOffset * Math.PI / 180;
   }
-
   renderer.render(scene, camera);
 }
 
 let deviceOrientation = null;
 
 function startSensors() {
-  // Use deviceorientationabsolute if available (Android), fallback otherwise
-  function handleOrientation(event) {
+  function handle(event) {
     deviceOrientation = {
-      alpha: event.alpha, // compass (0-360)
-      beta: event.beta,   // pitch (-180 to 180)
-      gamma: event.gamma, // roll (-90 to 90)
+      alpha: event.alpha, beta: event.beta, gamma: event.gamma,
       absolute: event.absolute,
       webkitCompassHeading: event.webkitCompassHeading
     };
-
     if (event.webkitCompassHeading != null) {
       userHeading = event.webkitCompassHeading;
     } else if (event.alpha != null) {
       userHeading = (360 - event.alpha) % 360;
     }
-    if (event.beta != null) userPitch = event.beta;
-    if (event.gamma != null) userRoll = event.gamma;
   }
-
-  window.addEventListener('deviceorientationabsolute', handleOrientation, true);
-  window.addEventListener('deviceorientation', handleOrientation, true);
-
-  showLog('Sensors listening');
+  window.addEventListener('deviceorientationabsolute', handle, true);
+  window.addEventListener('deviceorientation', handle, true);
 }
 
-// Convert device orientation to Three.js camera rotation
-// Reference: https://developer.mozilla.org/en-US/docs/Web/API/Device_orientation_events
 function updateCameraFromOrientation() {
   if (!deviceOrientation) return;
-  const alpha = (deviceOrientation.alpha || 0) * Math.PI / 180; // Z (yaw)
-  const beta = (deviceOrientation.beta || 0) * Math.PI / 180;   // X (pitch)
-  const gamma = (deviceOrientation.gamma || 0) * Math.PI / 180; // Y (roll)
-  const orient = (window.orientation || 0) * Math.PI / 180;     // screen rotation
+  const alpha = (deviceOrientation.alpha || 0) * Math.PI / 180;
+  const beta = (deviceOrientation.beta || 0) * Math.PI / 180;
+  const gamma = (deviceOrientation.gamma || 0) * Math.PI / 180;
+  const orient = (window.orientation || 0) * Math.PI / 180;
 
-  // Standard Web sensor → Three.js camera quaternion
   const euler = new THREE.Euler();
-  const q0 = new THREE.Quaternion();
-  const q1 = new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5)); // -PI/2 around X
-
+  const q1 = new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5));
   euler.set(beta, alpha, -gamma, 'YXZ');
   camera.quaternion.setFromEuler(euler);
-  camera.quaternion.multiply(q1); // camera looks out the back
+  camera.quaternion.multiply(q1);
+  const q0 = new THREE.Quaternion();
   q0.setFromAxisAngle(new THREE.Vector3(0, 0, 1), -orient);
   camera.quaternion.multiply(q0);
 }
 
+// ============================================================
+// GPS + render
+// ============================================================
 function waitForGPSThenRender() {
-  setStatus('รอ GPS fix...');
   showLog('Waiting for GPS...');
+  setStatus('รอ GPS fix...');
   if (!navigator.geolocation) { showLog('GPS not supported!', true); return; }
 
   navigator.geolocation.watchPosition((pos) => {
@@ -263,14 +350,13 @@ function waitForGPSThenRender() {
       altAcc: pos.coords.altitudeAccuracy
     };
     if (!window._rendered) {
-      showLog(`GPS: ${userPos.lat.toFixed(5)}, ${userPos.lon.toFixed(5)}`);
-      showLog(`Acc: ±${userPos.acc.toFixed(0)}m`);
+      showLog(`GPS: ${userPos.lat.toFixed(5)}, ${userPos.lon.toFixed(5)} ±${userPos.acc.toFixed(0)}m`);
       decideAnchorAndRender();
       window._rendered = true;
       setTimeout(() => {
         const logEl = document.getElementById('log');
         if (logEl) logEl.style.display = 'none';
-      }, 10000);
+      }, 12000);
     }
   }, (err) => {
     showLog('GPS error: ' + err.message, true);
@@ -279,60 +365,86 @@ function waitForGPSThenRender() {
 
 function decideAnchorAndRender() {
   if (testMode) {
-    const centroid = computeFeaturesCentroid(surfaceData);
-    if (centroid) {
-      const shiftLat = userPos.lat - centroid.lat;
-      const shiftLon = userPos.lon - centroid.lon;
-      shiftAllCoords(surfaceData, shiftLat, shiftLon);
-      showLog(`Test: shifted to user`);
+    const c = computeFeaturesCentroid(surfaceData);
+    if (c) {
+      shiftAllCoords(surfaceData, userPos.lat - c.lat, userPos.lon - c.lon);
+      showLog('Test: shifted to user');
     }
   }
   anchorPos = { lat: userPos.lat, lon: userPos.lon };
-  showLog(`Anchor: ${anchorPos.lat.toFixed(5)}, ${anchorPos.lon.toFixed(5)}`);
+
+  // Sample DTM at user position to get accurate ground MSL
+  const dtmGround = sampleDTM(anchorPos.lat, anchorPos.lon);
+  if (dtmGround !== null) {
+    userGroundMSL = dtmGround;
+    showLog(`✓ DTM ground at user: ${userGroundMSL.toFixed(1)} m MSL`);
+  } else {
+    userGroundMSL = manualGroundMSL;
+    showLog(`Using manual ground: ${userGroundMSL} m MSL`);
+  }
+  // Eye level = ground + 1.6 m (human height)
+  const eyeMSL = userGroundMSL + 1.6;
+  showLog(`Eye MSL: ${eyeMSL.toFixed(1)} m`);
 
   precomputeFeatures();
-  if (autoFit) computeAutoFit();
   renderSurfaces();
   if (showDebugMarkers) renderDebugMarkers();
+  printSurfaceSummary();
+}
+
+function printSurfaceSummary() {
+  // Print info about each surface relative to user
+  showLog('\n=== Surface info from your position ===');
+  const eyeMSL = userGroundMSL + 1.6;
+  allFeaturesEnu.forEach(p => {
+    if (p.minDist > renderRadius) return;
+    // Min/max altitude in this surface
+    let minA = Infinity, maxA = -Infinity;
+    p.rings.forEach(ring => ring.forEach(([lon, lat, alt]) => {
+      if (alt < minA) minA = alt;
+      if (alt > maxA) maxA = alt;
+    }));
+    const heightAboveEye = minA - eyeMSL;
+    const angleDeg = Math.atan(heightAboveEye / p.minDist) * 180 / Math.PI;
+    showLog(`${p.name}:`);
+    showLog(`  MSL: ${minA.toFixed(0)}-${maxA.toFixed(0)}m`);
+    showLog(`  Dist: ${p.minDist.toFixed(0)}m, Angle: ${angleDeg.toFixed(1)}°`);
+  });
 }
 
 function computeFeaturesCentroid(geojson) {
   let sumLat = 0, sumLon = 0, n = 0;
-  function walk(c) {
-    if (typeof c[0] === 'number') { sumLon += c[0]; sumLat += c[1]; n++; }
-    else c.forEach(walk);
-  }
-  geojson.features.forEach(f => walk(f.geometry.coordinates));
+  function w(c) { if (typeof c[0]==='number'){sumLon+=c[0];sumLat+=c[1];n++;} else c.forEach(w); }
+  geojson.features.forEach(f => w(f.geometry.coordinates));
   return n === 0 ? null : { lat: sumLat/n, lon: sumLon/n };
 }
-
 function shiftAllCoords(geojson, dLat, dLon) {
-  function walk(c) {
-    if (typeof c[0] === 'number') { c[0] += dLon; c[1] += dLat; }
-    else c.forEach(walk);
-  }
-  geojson.features.forEach(f => walk(f.geometry.coordinates));
+  function w(c) { if (typeof c[0]==='number'){c[0]+=dLon;c[1]+=dLat;} else c.forEach(w); }
+  geojson.features.forEach(f => w(f.geometry.coordinates));
 }
 
-// In our world:
-// X = East, Y = Up (altitude), Z = -North (forward of viewer when facing north)
-// Camera orientation handled by updateCameraFromOrientation
-function llToEnu(lat, lon, alt) {
+// ENU coordinates with camera at origin
+// Camera eye is at MSL = userGroundMSL + 1.6
+// Surface alt MSL is converted to Y relative to eye:
+//   Y = surface_alt_msl - eye_msl
+function llToCamRelative(lat, lon, alt) {
   const R = 6378137;
   const dLat = (lat - anchorPos.lat) * Math.PI / 180;
   const dLon = (lon - anchorPos.lon) * Math.PI / 180;
-  const refLatRad = anchorPos.lat * Math.PI / 180;
-  const east  = dLon * R * Math.cos(refLatRad);
+  const refLat = anchorPos.lat * Math.PI / 180;
+  const east = dLon * R * Math.cos(refLat);
   const north = dLat * R;
-  return { x: east, y: (alt || 0), z: -north };
+  const eyeMSL = userGroundMSL + 1.6;
+  const y = (alt || 0) - eyeMSL + surfaceOffsetY;
+  return { x: east, y: y, z: -north };
 }
 
 function horizDistFromAnchor(lat, lon) {
   const R = 6378137;
   const dLat = (lat - anchorPos.lat) * Math.PI / 180;
   const dLon = (lon - anchorPos.lon) * Math.PI / 180;
-  const refLatRad = anchorPos.lat * Math.PI / 180;
-  const east  = dLon * R * Math.cos(refLatRad);
+  const refLat = anchorPos.lat * Math.PI / 180;
+  const east = dLon * R * Math.cos(refLat);
   const north = dLat * R;
   return Math.sqrt(east*east + north*north);
 }
@@ -342,48 +454,26 @@ function precomputeFeatures() {
   surfaceData.features.forEach((feat, idx) => {
     const name = feat.properties?.name || `Feature ${idx}`;
     const color = getSurfaceColor(name);
-    const geom = feat.geometry;
     let polygons = [];
-    if (geom.type === 'Polygon') polygons = [geom.coordinates];
-    else if (geom.type === 'MultiPolygon') polygons = geom.coordinates;
+    if (feat.geometry.type === 'Polygon') polygons = [feat.geometry.coordinates];
+    else if (feat.geometry.type === 'MultiPolygon') polygons = feat.geometry.coordinates;
     else return;
-
     polygons.forEach((rings) => {
       let minDist = Infinity;
-      rings.forEach(ring => {
-        ring.forEach(([lon, lat]) => {
-          const d = horizDistFromAnchor(lat, lon);
-          if (d < minDist) minDist = d;
-        });
-      });
+      rings.forEach(ring => ring.forEach(([lon, lat]) => {
+        const d = horizDistFromAnchor(lat, lon);
+        if (d < minDist) minDist = d;
+      }));
       allFeaturesEnu.push({ name, color, rings, minDist });
     });
   });
   showLog(`Pre-computed ${allFeaturesEnu.length} polys`);
 }
 
-function computeAutoFit() {
-  let minAlt = Infinity;
-  allFeaturesEnu.forEach(p => {
-    if (p.minDist > renderRadius) return;
-    p.rings.forEach(ring => {
-      ring.forEach(([lon, lat, alt]) => { if (alt < minAlt) minAlt = alt; });
-    });
-  });
-  if (minAlt === Infinity) return;
-  // Camera at Y=1.6, want lowest surface at Y~10 (visible above horizon)
-  surfaceOffsetY = 10 - minAlt;
-  showLog(`Auto-fit: minAlt=${minAlt.toFixed(0)}, offset=${surfaceOffsetY.toFixed(0)}`);
-  document.getElementById('surface-offset').value = Math.round(surfaceOffsetY);
-}
-
 function renderSurfaces() {
-  // Clear previous surface meshes
   surfaceMeshes.forEach(m => worldGroup.remove(m));
   surfaceMeshes = [];
-
   let polyCount = 0, totalTris = 0, skipped = 0;
-
   allFeaturesEnu.forEach(p => {
     if (p.minDist > renderRadius) { skipped++; return; }
     const mesh = createPolygonMesh(p.rings, p.color, p.name);
@@ -394,20 +484,15 @@ function renderSurfaces() {
       totalTris += mesh.userData.triCount || 0;
     }
   });
-
   showLog(`✓ Rendered ${polyCount} polys, ${totalTris} tris`);
-  showLog(`scene.children: ${scene.children.length}, world.children: ${worldGroup.children.length}`);
-  setStatus(`${polyCount} polys, ${totalTris} tris`);
 }
 
 function createPolygonMesh(rings, color, name) {
   const outer = rings[0];
   if (!outer || outer.length < 3) return null;
-
   const flat2D = [];
   const pos3D = [];
   const holeIdx = [];
-
   let vIdx = 0;
   rings.forEach((ring, ri) => {
     if (ri > 0) holeIdx.push(vIdx);
@@ -416,21 +501,18 @@ function createPolygonMesh(rings, color, name) {
       ring[0][1] === ring[ring.length-1][1]) ? ring.length - 1 : ring.length;
     for (let i = 0; i < lastIdx; i++) {
       const [lon, lat, alt] = ring[i];
-      const enu = llToEnu(lat, lon, alt);
-      flat2D.push(enu.x, enu.z);
-      pos3D.push(enu.x, enu.y + surfaceOffsetY, enu.z);
+      const c = llToCamRelative(lat, lon, alt);
+      flat2D.push(c.x, c.z);
+      pos3D.push(c.x, c.y, c.z);
       vIdx++;
     }
   });
-
   const tris = earcut(flat2D, holeIdx, 2);
   if (tris.length === 0) return null;
-
   const geom = new THREE.BufferGeometry();
   geom.setAttribute('position', new THREE.Float32BufferAttribute(pos3D, 3));
   geom.setIndex(tris);
   geom.computeVertexNormals();
-
   const mat = new THREE.MeshBasicMaterial({
     color: color, transparent: true, opacity: 0.4,
     side: THREE.DoubleSide, depthWrite: false
@@ -438,66 +520,58 @@ function createPolygonMesh(rings, color, name) {
   const mesh = new THREE.Mesh(geom, mat);
   mesh.name = name;
   mesh.userData = { name, triCount: tris.length / 3 };
-
-  // Wireframe overlay
-  const wireMat = new THREE.MeshBasicMaterial({
+  // Wireframe child
+  mesh.add(new THREE.Mesh(geom, new THREE.MeshBasicMaterial({
     color: color, wireframe: true, transparent: true, opacity: 0.85
-  });
-  mesh.add(new THREE.Mesh(geom, wireMat));
-
-  // Outline of outer ring
+  })));
+  // Outline
   const outPts = [];
   outer.forEach(([lon, lat, alt]) => {
-    const enu = llToEnu(lat, lon, alt);
-    outPts.push(new THREE.Vector3(enu.x, enu.y + surfaceOffsetY, enu.z));
+    const c = llToCamRelative(lat, lon, alt);
+    outPts.push(new THREE.Vector3(c.x, c.y, c.z));
   });
-  const lineGeom = new THREE.BufferGeometry().setFromPoints(outPts);
-  const lineMat = new THREE.LineBasicMaterial({ color: color });
-  mesh.add(new THREE.Line(lineGeom, lineMat));
-
+  mesh.add(new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints(outPts),
+    new THREE.LineBasicMaterial({ color: color })
+  ));
   return mesh;
 }
 
 function renderDebugMarkers() {
-  // Big colored pillars at cardinal directions
   const dist = 30;
   const markers = [
-    { name: 'N', x: 0, z: -dist, color: 0xff0000 },
-    { name: 'E', x: dist, z: 0, color: 0x00ff00 },
-    { name: 'S', x: 0, z: dist, color: 0xffff00 },
-    { name: 'W', x: -dist, z: 0, color: 0x00ffff },
+    { x: 0, z: -dist, color: 0xff0000 },
+    { x: dist, z: 0, color: 0x00ff00 },
+    { x: 0, z: dist, color: 0xffff00 },
+    { x: -dist, z: 0, color: 0x00ffff },
   ];
-
   markers.forEach(m => {
-    const geom = new THREE.CylinderGeometry(2, 2, 20, 8);
-    const mat = new THREE.MeshBasicMaterial({ color: m.color });
-    const pillar = new THREE.Mesh(geom, mat);
-    pillar.position.set(m.x, 10, m.z);
+    const pillar = new THREE.Mesh(
+      new THREE.CylinderGeometry(2, 2, 20, 8),
+      new THREE.MeshBasicMaterial({ color: m.color })
+    );
+    pillar.position.set(m.x, 0, m.z); // centered at eye level
     worldGroup.add(pillar);
-
-    // Big sphere on top
-    const sg = new THREE.SphereGeometry(5, 12, 12);
-    const sm = new THREE.MeshBasicMaterial({ color: m.color, transparent: true, opacity: 0.7 });
-    const sphere = new THREE.Mesh(sg, sm);
-    sphere.position.set(m.x, 25, m.z);
+    const sphere = new THREE.Mesh(
+      new THREE.SphereGeometry(5, 12, 12),
+      new THREE.MeshBasicMaterial({ color: m.color, transparent: true, opacity: 0.7 })
+    );
+    sphere.position.set(m.x, 12, m.z);
     worldGroup.add(sphere);
   });
 
-  // CRITICAL TEST: a big red box right in front of camera at 5m
-  const testGeom = new THREE.BoxGeometry(2, 2, 2);
-  const testMat = new THREE.MeshBasicMaterial({ color: 0xff00ff });
-  const testBox = new THREE.Mesh(testGeom, testMat);
-  testBox.position.set(0, 1.6, -5); // 5m in front of camera at eye level
-  scene.add(testBox); // Add directly to scene, not worldGroup
-  showLog('TEST BOX added at (0, 1.6, -5) - should always be visible');
-
-  showLog(`Debug: 4 pillars at ${dist}m around`);
+  // TEST BOX always in front of camera (in scene, not worldGroup)
+  const testBox = new THREE.Mesh(
+    new THREE.BoxGeometry(1, 1, 1),
+    new THREE.MeshBasicMaterial({ color: 0xff00ff })
+  );
+  testBox.position.set(0, 0, -5);
+  scene.add(testBox);
 }
 
 function adjustHeight(delta) {
   surfaceOffsetY += delta;
-  document.getElementById('surface-offset').value = Math.round(surfaceOffsetY);
-  showLog(`Surface Y: ${surfaceOffsetY}`);
+  showLog(`Surface Y offset: ${surfaceOffsetY}`);
   surfaceMeshes.forEach(mesh => {
     const arr = mesh.geometry.attributes.position.array;
     for (let i = 1; i < arr.length; i += 3) arr[i] += delta;
@@ -512,11 +586,14 @@ function adjustHeight(delta) {
   });
 }
 
-function setStatus(html) {
-  const el = document.getElementById('status');
-  if (el) el.innerHTML = html;
+function adjustHeading(delta) {
+  headingOffset = (headingOffset + delta) % 360;
+  showLog(`Heading offset: ${headingOffset}°`);
 }
 
+// ============================================================
+// Status loops
+// ============================================================
 function startStatusLoop() {
   setInterval(() => {
     if (!userPos) return;
@@ -524,20 +601,57 @@ function startStatusLoop() {
     let html = `
       <div class="row"><span class="label">Pos</span><span>${userPos.lat.toFixed(5)}, ${userPos.lon.toFixed(5)}</span></div>
       <div class="row"><span class="label">Acc</span><span class="${accClass}">±${userPos.acc.toFixed(0)}m</span></div>
-      <div class="row"><span class="label">Hdg</span><span>${userHeading.toFixed(0)}°</span></div>
-      <div class="row"><span class="label">Surf-Y</span><span>${surfaceOffsetY.toFixed(0)}m</span></div>
+      <div class="row"><span class="label">Hdg</span><span>${userHeading.toFixed(0)}° (off ${headingOffset}°)</span></div>
+      <div class="row"><span class="label">Ground</span><span>${userGroundMSL ? userGroundMSL.toFixed(1) + 'm' : '-'}</span></div>
+      <div class="row"><span class="label">Eye MSL</span><span>${userGroundMSL ? (userGroundMSL+1.6).toFixed(1) + 'm' : '-'}</span></div>
+      <div class="row"><span class="label">Surf-Y</span><span>${surfaceOffsetY}m</span></div>
       <div class="row"><span class="label">Meshes</span><span>${surfaceMeshes.length}</span></div>
     `;
     setStatus(html);
   }, 500);
 }
 
+// Update aim info under crosshair
+function startAimInfoLoop() {
+  const aimEl = document.getElementById('aim-info');
+  setInterval(() => {
+    if (!camera || !surfaceMeshes.length) {
+      aimEl.textContent = '';
+      return;
+    }
+    // Raycast from camera forward
+    const raycaster = new THREE.Raycaster();
+    raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+    raycaster.far = 50000;
+    // Cast against all surface meshes (collect their geometries)
+    const targets = [];
+    surfaceMeshes.forEach(m => {
+      targets.push(m);
+      m.children.forEach(c => { if (c.type === 'Mesh') targets.push(c); });
+    });
+    const hits = raycaster.intersectObjects(targets, false);
+    if (hits.length > 0) {
+      const h = hits[0];
+      const dist = h.distance;
+      const surfMSL = h.point.y + (userGroundMSL + 1.6);
+      const heightAboveEye = h.point.y;
+      aimEl.textContent =
+        `${h.object.parent?.name || h.object.name || '?'}\n` +
+        `${dist.toFixed(0)}m | MSL ${surfMSL.toFixed(0)}m | ${heightAboveEye>=0?'+':''}${heightAboveEye.toFixed(0)}m above eye`;
+    } else {
+      aimEl.textContent = '— ไม่ได้เล็ง surface —';
+    }
+  }, 200);
+}
+
+// ============================================================
+// Mini-map
+// ============================================================
 function startMinimapLoop() {
   const canvas = document.getElementById('minimap');
   if (!canvas) return;
   const ctx = canvas.getContext('2d');
   const W = canvas.width, H = canvas.height;
-
   function draw() {
     if (!anchorPos || allFeaturesEnu.length === 0) {
       requestAnimationFrame(draw); return;
@@ -555,7 +669,6 @@ function startMinimapLoop() {
       ctx.arc(cx, cy, r * scale, 0, Math.PI * 2);
       ctx.stroke();
     }
-
     ctx.fillStyle = '#4ade80';
     ctx.font = 'bold 11px sans-serif';
     ctx.textAlign = 'center';
@@ -564,7 +677,7 @@ function startMinimapLoop() {
     ctx.fillText('E', W - 8, cy + 4);
     ctx.fillText('W', 8, cy + 4);
 
-    const headingRad = userHeading * Math.PI / 180;
+    const headingRad = (userHeading - headingOffset) * Math.PI / 180;
     allFeaturesEnu.forEach(p => {
       const colorHex = '#' + p.color.toString(16).padStart(6, '0');
       ctx.strokeStyle = colorHex;
@@ -573,9 +686,9 @@ function startMinimapLoop() {
       ctx.beginPath();
       const ring = p.rings[0];
       ring.forEach(([lon, lat, alt], i) => {
-        const enu = llToEnu(lat, lon, alt);
-        const rx = enu.x * Math.cos(-headingRad) - (-enu.z) * Math.sin(-headingRad);
-        const ry = enu.x * Math.sin(-headingRad) + (-enu.z) * Math.cos(-headingRad);
+        const c = llToCamRelative(lat, lon, alt);
+        const rx = c.x * Math.cos(-headingRad) - (-c.z) * Math.sin(-headingRad);
+        const ry = c.x * Math.sin(-headingRad) + (-c.z) * Math.cos(-headingRad);
         const px = cx + rx * scale;
         const py = cy - ry * scale;
         if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
@@ -584,7 +697,6 @@ function startMinimapLoop() {
       ctx.fill();
       ctx.stroke();
     });
-
     ctx.fillStyle = '#ffffff';
     ctx.beginPath();
     ctx.arc(cx, cy, 4, 0, Math.PI * 2);
