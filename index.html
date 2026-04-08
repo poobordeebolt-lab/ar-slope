@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>AR Slope Surface Viewer</title>
+
+  <!-- A-Frame -->
+  <script src="https://aframe.io/releases/1.4.0/aframe.min.js"></script>
+  <!-- AR.js location-based -->
+  <script src="https://raw.githack.com/AR-js-org/AR.js/master/aframe/build/aframe-ar-nft.js"></script>
+
+  <style>
+    body { margin: 0; overflow: hidden; font-family: -apple-system, sans-serif; }
+
+    #ui {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      background: rgba(0,0,0,0.75);
+      color: white;
+      padding: 10px;
+      z-index: 1000;
+      font-size: 13px;
+      max-height: 35vh;
+      overflow-y: auto;
+    }
+    #ui h3 { margin: 0 0 6px 0; font-size: 14px; }
+    #status { font-family: monospace; font-size: 11px; line-height: 1.5; }
+    .row { display: flex; justify-content: space-between; }
+    .label { opacity: 0.7; }
+    .good { color: #4ade80; }
+    .warn { color: #fbbf24; }
+    .bad { color: #f87171; }
+
+    #file-input {
+      position: fixed;
+      top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      background: rgba(0,0,0,0.9);
+      color: white;
+      padding: 20px;
+      border-radius: 12px;
+      z-index: 2000;
+      text-align: center;
+      width: 80%;
+      max-width: 320px;
+    }
+    #file-input button, #file-input label {
+      display: block;
+      width: 100%;
+      padding: 12px;
+      margin: 8px 0;
+      background: #2563eb;
+      color: white;
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    #file-input input { display: none; }
+    #file-input p { font-size: 12px; opacity: 0.8; margin: 8px 0; }
+
+    #legend {
+      position: fixed;
+      bottom: 10px; left: 10px;
+      background: rgba(0,0,0,0.75);
+      color: white;
+      padding: 8px 12px;
+      border-radius: 8px;
+      font-size: 11px;
+      z-index: 1000;
+    }
+    .swatch { display: inline-block; width: 12px; height: 12px; margin-right: 6px; vertical-align: middle; }
+  </style>
+</head>
+<body>
+
+<div id="file-input">
+  <h3 style="margin-top:0;color:white">AR Slope Viewer</h3>
+  <p>โหลด slope surface GeoJSON ของคุณ</p>
+  <label for="geojson-file">📂 เลือกไฟล์ GeoJSON</label>
+  <input type="file" id="geojson-file" accept=".geojson,.json">
+  <button onclick="loadDemo()">▶ ใช้ Demo (รอบตำแหน่งปัจจุบัน)</button>
+  <p style="font-size:10px;opacity:0.6">ต้องเปิดผ่าน HTTPS และอนุญาต Location + Camera</p>
+</div>
+
+<div id="ui" style="display:none">
+  <h3>AR Slope Viewer</h3>
+  <div id="status">กำลังเริ่มต้น...</div>
+</div>
+
+<div id="legend" style="display:none">
+  <div><span class="swatch" style="background:#22c55e"></span>ต่ำกว่า surface (ปลอดภัย)</div>
+  <div><span class="swatch" style="background:#ef4444"></span>เกิน surface (เตือน)</div>
+  <div><span class="swatch" style="background:#3b82f6"></span>Slope surface mesh</div>
+</div>
+
+<a-scene
+  id="scene"
+  vr-mode-ui="enabled: false"
+  arjs="sourceType: webcam; videoTexture: true; debugUIEnabled: false;"
+  renderer="antialias: true; alpha: true"
+  embedded
+  style="display:none">
+
+  <a-camera gps-camera rotation-reader></a-camera>
+
+</a-scene>
+
+<script src="app.js"></script>
+</body>
+</html>
