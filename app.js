@@ -1,29 +1,37 @@
 // =============================================
-// AR OLS Surface Viewer v6
-// + DTM ground sampling for accurate elevation
-// + HUD: crosshair, aim info
-// + Compass calibration buttons
-// + No auto-fit — uses real MSL throughout
+// AR OLS Surface Viewer v7
+// + Height block grid (gradient color + labels)
+// + Terrain mesh from DTM (1km radius)
+// + HUD shows: surface + block max_height + terrain
 // =============================================
 
 let userPos = null;
 let userHeading = 0;
 let surfaceData = null;
 let dtmHeader = null;
-let dtmData = null; // Int16Array
+let dtmData = null;
+let heightBlockData = null;
 let renderRadius = 8000;
+let blockRadius = 2000;
+let terrainRadius = 1000;
 let testMode = false;
 let showDebugMarkers = true;
-let surfaceOffsetY = 0;        // manual Y offset (use ⬆⬇)
-let headingOffset = 0;          // manual heading correction (use ⟲⟳)
+let showTerrain = true;
+let showBlocks = true;
+let showLabels = true;
+let surfaceOffsetY = 0;
+let headingOffset = 0;
 let manualGroundMSL = 30;
-let userGroundMSL = null;       // sampled from DTM or manual
+let userGroundMSL = null;
 let anchorPos = null;
 let allFeaturesEnu = [];
+let allBlocksEnu = [];
 
-// Three.js
 let renderer, scene, camera, worldGroup;
 let surfaceMeshes = [];
+let blockMeshes = [];
+let labelSprites = [];
+let terrainMesh = null;
 
 const SURFACE_COLORS = {
   'inner horizontal': 0x3b82f6,
@@ -42,6 +50,23 @@ function getSurfaceColor(name) {
     if (lower.includes(key)) return SURFACE_COLORS[key];
   }
   return SURFACE_COLORS.default;
+}
+
+// Gradient: red (low/negative) → yellow → green (high)
+// Range: -80 to +145 in the file
+function getHeightBlockColor(maxHeight) {
+  // Normalize to 0..1 with -50 = red, 0 = orange, 50 = yellow, 100+ = green
+  const t = Math.max(0, Math.min(1, (maxHeight + 50) / 200));
+  // Linear gradient: red(0) → yellow(0.5) → green(1)
+  let r, g, b;
+  if (t < 0.5) {
+    // red → yellow
+    r = 1; g = t * 2; b = 0;
+  } else {
+    // yellow → green
+    r = 1 - (t - 0.5) * 2; g = 1; b = 0;
+  }
+  return new THREE.Color(r, g, b);
 }
 
 function showLog(msg, isError = false) {
@@ -68,101 +93,105 @@ function setStatus(html) {
 // ============================================================
 // File loading
 // ============================================================
-let dtmHeaderLoaded = false;
-let dtmBinLoaded = false;
+let dtmHeaderLoaded = false, dtmBinLoaded = false;
 
 function checkReadyToStart() {
   document.getElementById('start-btn').disabled = !surfaceData;
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-  // OLS file
+  // OLS
   document.getElementById('geojson-file').addEventListener('change', (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (evt) => {
+    const file = e.target.files[0]; if (!file) return;
+    const r = new FileReader();
+    r.onload = (evt) => {
       try {
         surfaceData = JSON.parse(evt.target.result);
-        if (!surfaceData.features) throw new Error('ไม่ใช่ FeatureCollection');
-        let nv = 0;
-        function cv(c) { if (typeof c[0]==='number') return 1; return c.reduce((s,x)=>s+cv(x),0); }
-        surfaceData.features.forEach(f => nv += cv(f.geometry.coordinates));
+        if (!surfaceData.features) throw new Error('not FeatureCollection');
         document.getElementById('ols-status').innerHTML =
-          `<span style="color:#4ade80">✓ ${file.name}<br>${surfaceData.features.length} features, ${nv} verts</span>`;
+          `<span style="color:#4ade80">✓ ${file.name} (${surfaceData.features.length} features)</span>`;
         document.getElementById('ols-label').classList.add('has-file');
-        document.getElementById('ols-label').textContent = `✓ OLS: ${file.name}`;
+        document.getElementById('ols-label').textContent = `✓ ${file.name}`;
         checkReadyToStart();
       } catch (err) {
-        document.getElementById('ols-status').innerHTML =
-          `<span style="color:#f87171">✗ ${err.message}</span>`;
+        document.getElementById('ols-status').innerHTML = `<span style="color:#f87171">✗ ${err.message}</span>`;
       }
     };
-    reader.readAsText(file);
+    r.readAsText(file);
   });
 
   // DTM header
   document.getElementById('dtm-header-file').addEventListener('change', (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (evt) => {
+    const file = e.target.files[0]; if (!file) return;
+    const r = new FileReader();
+    r.onload = (evt) => {
       try {
         dtmHeader = JSON.parse(evt.target.result);
-        if (!dtmHeader.bbox || !dtmHeader.width || !dtmHeader.height) {
-          throw new Error('header ไม่ครบ');
-        }
+        if (!dtmHeader.bbox || !dtmHeader.width) throw new Error('invalid header');
         dtmHeaderLoaded = true;
         document.getElementById('dtm-header-label').classList.add('has-file');
         document.getElementById('dtm-header-label').textContent = `✓ ${file.name}`;
         updateDtmStatus();
       } catch (err) {
-        document.getElementById('dtm-status').innerHTML =
-          `<span style="color:#f87171">✗ header: ${err.message}</span>`;
+        document.getElementById('dtm-status').innerHTML = `<span style="color:#f87171">✗ ${err.message}</span>`;
       }
     };
-    reader.readAsText(file);
+    r.readAsText(file);
   });
 
   // DTM binary
   document.getElementById('dtm-bin-file').addEventListener('change', (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (evt) => {
+    const file = e.target.files[0]; if (!file) return;
+    const r = new FileReader();
+    r.onload = (evt) => {
       try {
-        const buf = evt.target.result;
-        dtmData = new Int16Array(buf);
+        dtmData = new Int16Array(evt.target.result);
         dtmBinLoaded = true;
         document.getElementById('dtm-bin-label').classList.add('has-file');
-        document.getElementById('dtm-bin-label').textContent = `✓ ${file.name} (${(buf.byteLength/1e6).toFixed(1)} MB)`;
+        document.getElementById('dtm-bin-label').textContent = `✓ ${file.name} (${(evt.target.result.byteLength/1e6).toFixed(1)}MB)`;
         updateDtmStatus();
       } catch (err) {
-        document.getElementById('dtm-status').innerHTML =
-          `<span style="color:#f87171">✗ binary: ${err.message}</span>`;
+        document.getElementById('dtm-status').innerHTML = `<span style="color:#f87171">✗ ${err.message}</span>`;
       }
     };
-    reader.readAsArrayBuffer(file);
+    r.readAsArrayBuffer(file);
+  });
+
+  // Height blocks
+  document.getElementById('hblock-file').addEventListener('change', (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    const r = new FileReader();
+    r.onload = (evt) => {
+      try {
+        heightBlockData = JSON.parse(evt.target.result);
+        if (!heightBlockData.features) throw new Error('not FeatureCollection');
+        // Verify max_height_allowance exists
+        const sample = heightBlockData.features[0];
+        if (!sample.properties || sample.properties.max_height_allowance === undefined) {
+          throw new Error('missing max_height_allowance property');
+        }
+        document.getElementById('hblock-status').innerHTML =
+          `<span style="color:#4ade80">✓ ${file.name} (${heightBlockData.features.length} blocks)</span>`;
+        document.getElementById('hblock-label').classList.add('has-file');
+        document.getElementById('hblock-label').textContent = `✓ ${file.name}`;
+      } catch (err) {
+        document.getElementById('hblock-status').innerHTML = `<span style="color:#f87171">✗ ${err.message}</span>`;
+      }
+    };
+    r.readAsText(file);
   });
 });
 
 function updateDtmStatus() {
   const status = document.getElementById('dtm-status');
   if (dtmHeaderLoaded && dtmBinLoaded) {
-    const expectedSize = dtmHeader.width * dtmHeader.height;
-    if (dtmData.length !== expectedSize) {
-      status.innerHTML = `<span style="color:#f87171">✗ ขนาดไม่ตรง: ${dtmData.length} vs ${expectedSize}</span>`;
+    if (dtmData.length !== dtmHeader.width * dtmHeader.height) {
+      status.innerHTML = `<span style="color:#f87171">✗ size mismatch</span>`;
       return;
     }
-    status.innerHTML =
-      `<span style="color:#4ade80">✓ DTM พร้อม<br>` +
-      `${dtmHeader.width}×${dtmHeader.height} cells<br>` +
-      `bbox: ${dtmHeader.bbox.south.toFixed(3)},${dtmHeader.bbox.west.toFixed(3)} → ${dtmHeader.bbox.north.toFixed(3)},${dtmHeader.bbox.east.toFixed(3)}` +
-      `</span>`;
-  } else if (dtmHeaderLoaded) {
-    status.innerHTML = '<span style="color:#fbbf24">รอไฟล์ binary...</span>';
+    status.innerHTML = `<span style="color:#4ade80">✓ DTM ${dtmHeader.width}×${dtmHeader.height}</span>`;
   } else {
-    status.innerHTML = '<span style="color:#fbbf24">รอ header...</span>';
+    status.innerHTML = '<span style="color:#fbbf24">รออีกไฟล์...</span>';
   }
 }
 
@@ -172,36 +201,20 @@ function updateDtmStatus() {
 function sampleDTM(lat, lon) {
   if (!dtmHeader || !dtmData) return null;
   const { bbox, width, height, nodata } = dtmHeader;
-
-  if (lat < bbox.south || lat > bbox.north || lon < bbox.west || lon > bbox.east) {
-    return null;
-  }
-
-  // Convert lat/lon to fractional pixel index
-  // Note: DTM is row-major with row 0 = NORTH (highest lat)
+  if (lat < bbox.south || lat > bbox.north || lon < bbox.west || lon > bbox.east) return null;
   const fx = (lon - bbox.west) / (bbox.east - bbox.west) * (width - 1);
   const fy = (bbox.north - lat) / (bbox.north - bbox.south) * (height - 1);
-
   const x0 = Math.floor(fx), x1 = Math.min(x0 + 1, width - 1);
   const y0 = Math.floor(fy), y1 = Math.min(y0 + 1, height - 1);
   const dx = fx - x0, dy = fy - y0;
-
   function get(x, y) {
     const v = dtmData[y * width + x];
     return v === nodata ? null : v;
   }
-
-  const v00 = get(x0, y0);
-  const v10 = get(x1, y0);
-  const v01 = get(x0, y1);
-  const v11 = get(x1, y1);
-
-  // If any nodata, return mean of valid neighbors
+  const v00 = get(x0, y0), v10 = get(x1, y0), v01 = get(x0, y1), v11 = get(x1, y1);
   const valids = [v00, v10, v01, v11].filter(v => v !== null);
   if (valids.length === 0) return null;
   if (valids.length < 4) return valids.reduce((a,b)=>a+b, 0) / valids.length;
-
-  // Bilinear interpolation
   const v0 = v00 * (1 - dx) + v10 * dx;
   const v1 = v01 * (1 - dx) + v11 * dx;
   return v0 * (1 - dy) + v1 * dy;
@@ -213,13 +226,17 @@ function sampleDTM(lat, lon) {
 async function startAR() {
   if (!surfaceData) return;
   renderRadius = parseInt(document.getElementById('render-radius').value) || 8000;
+  blockRadius = parseInt(document.getElementById('block-radius').value) || 2000;
+  terrainRadius = parseInt(document.getElementById('terrain-radius').value) || 1000;
   testMode = document.getElementById('test-mode').checked;
   showDebugMarkers = document.getElementById('debug-markers').checked;
+  showTerrain = document.getElementById('show-terrain').checked;
+  showBlocks = document.getElementById('show-blocks').checked;
+  showLabels = document.getElementById('show-labels').checked;
   manualGroundMSL = parseFloat(document.getElementById('manual-ground').value) || 30;
 
-  showLog('=== AR v6 ===');
-  showLog(`Mode: ${testMode ? 'TEST' : 'REAL'}, Radius: ${renderRadius}m`);
-  showLog(`DTM: ${dtmData ? 'loaded' : 'NOT loaded (using manual ground)'}`);
+  showLog('=== AR v7 ===');
+  showLog(`DTM: ${dtmData ? '✓' : '✗'}, Blocks: ${heightBlockData ? '✓' : '✗'}`);
 
   document.getElementById('file-input').style.display = 'none';
   document.getElementById('ui').style.display = 'block';
@@ -229,15 +246,11 @@ async function startAR() {
   document.getElementById('crosshair').style.display = 'block';
   document.getElementById('aim-info').style.display = 'block';
 
-  // iOS sensor permission
   if (typeof DeviceOrientationEvent !== 'undefined' &&
       typeof DeviceOrientationEvent.requestPermission === 'function') {
-    try {
-      await DeviceOrientationEvent.requestPermission();
-    } catch (e) {}
+    try { await DeviceOrientationEvent.requestPermission(); } catch (e) {}
   }
 
-  // Camera
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
@@ -270,8 +283,6 @@ function initThree() {
 
   scene = new THREE.Scene();
   camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 100000);
-  // Camera at origin (0,0,0). We'll position the world relative to this.
-  // Camera Y = 0 means "user's eye level".
   camera.position.set(0, 0, 0);
 
   worldGroup = new THREE.Group();
@@ -283,22 +294,16 @@ function initThree() {
     camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight);
   });
-
-  showLog('Three.js initialized');
 }
 
 function animate() {
   requestAnimationFrame(animate);
   if (deviceOrientation) updateCameraFromOrientation();
-  // Apply heading offset by rotating world group around Y
-  if (worldGroup) {
-    worldGroup.rotation.y = headingOffset * Math.PI / 180;
-  }
+  if (worldGroup) worldGroup.rotation.y = headingOffset * Math.PI / 180;
   renderer.render(scene, camera);
 }
 
 let deviceOrientation = null;
-
 function startSensors() {
   function handle(event) {
     deviceOrientation = {
@@ -306,11 +311,8 @@ function startSensors() {
       absolute: event.absolute,
       webkitCompassHeading: event.webkitCompassHeading
     };
-    if (event.webkitCompassHeading != null) {
-      userHeading = event.webkitCompassHeading;
-    } else if (event.alpha != null) {
-      userHeading = (360 - event.alpha) % 360;
-    }
+    if (event.webkitCompassHeading != null) userHeading = event.webkitCompassHeading;
+    else if (event.alpha != null) userHeading = (360 - event.alpha) % 360;
   }
   window.addEventListener('deviceorientationabsolute', handle, true);
   window.addEventListener('deviceorientation', handle, true);
@@ -322,7 +324,6 @@ function updateCameraFromOrientation() {
   const beta = (deviceOrientation.beta || 0) * Math.PI / 180;
   const gamma = (deviceOrientation.gamma || 0) * Math.PI / 180;
   const orient = (window.orientation || 0) * Math.PI / 180;
-
   const euler = new THREE.Euler();
   const q1 = new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5));
   euler.set(beta, alpha, -gamma, 'YXZ');
@@ -334,19 +335,15 @@ function updateCameraFromOrientation() {
 }
 
 // ============================================================
-// GPS + render
+// GPS & render orchestration
 // ============================================================
 function waitForGPSThenRender() {
   showLog('Waiting for GPS...');
   setStatus('รอ GPS fix...');
-  if (!navigator.geolocation) { showLog('GPS not supported!', true); return; }
-
   navigator.geolocation.watchPosition((pos) => {
     userPos = {
-      lat: pos.coords.latitude,
-      lon: pos.coords.longitude,
-      alt: pos.coords.altitude,
-      acc: pos.coords.accuracy,
+      lat: pos.coords.latitude, lon: pos.coords.longitude,
+      alt: pos.coords.altitude, acc: pos.coords.accuracy,
       altAcc: pos.coords.altitudeAccuracy
     };
     if (!window._rendered) {
@@ -358,76 +355,53 @@ function waitForGPSThenRender() {
         if (logEl) logEl.style.display = 'none';
       }, 12000);
     }
-  }, (err) => {
-    showLog('GPS error: ' + err.message, true);
-  }, { enableHighAccuracy: true, maximumAge: 0, timeout: 30000 });
+  }, (err) => showLog('GPS error: ' + err.message, true),
+  { enableHighAccuracy: true, maximumAge: 0, timeout: 30000 });
 }
 
 function decideAnchorAndRender() {
   if (testMode) {
     const c = computeFeaturesCentroid(surfaceData);
     if (c) {
-      shiftAllCoords(surfaceData, userPos.lat - c.lat, userPos.lon - c.lon);
+      const dLat = userPos.lat - c.lat, dLon = userPos.lon - c.lon;
+      shiftAllCoords(surfaceData, dLat, dLon);
+      if (heightBlockData) shiftAllCoords(heightBlockData, dLat, dLon);
       showLog('Test: shifted to user');
     }
   }
   anchorPos = { lat: userPos.lat, lon: userPos.lon };
 
-  // Sample DTM at user position to get accurate ground MSL
   const dtmGround = sampleDTM(anchorPos.lat, anchorPos.lon);
   if (dtmGround !== null) {
     userGroundMSL = dtmGround;
-    showLog(`✓ DTM ground at user: ${userGroundMSL.toFixed(1)} m MSL`);
+    showLog(`✓ DTM ground: ${userGroundMSL.toFixed(1)}m`);
   } else {
     userGroundMSL = manualGroundMSL;
-    showLog(`Using manual ground: ${userGroundMSL} m MSL`);
+    showLog(`Manual ground: ${userGroundMSL}m`);
   }
-  // Eye level = ground + 1.6 m (human height)
-  const eyeMSL = userGroundMSL + 1.6;
-  showLog(`Eye MSL: ${eyeMSL.toFixed(1)} m`);
+  showLog(`Eye MSL: ${(userGroundMSL+1.6).toFixed(1)}m`);
 
   precomputeFeatures();
+  if (heightBlockData) precomputeBlocks();
   renderSurfaces();
+  if (showBlocks && heightBlockData) renderHeightBlocks();
+  if (showTerrain && dtmData) renderTerrain();
   if (showDebugMarkers) renderDebugMarkers();
-  printSurfaceSummary();
-}
-
-function printSurfaceSummary() {
-  // Print info about each surface relative to user
-  showLog('\n=== Surface info from your position ===');
-  const eyeMSL = userGroundMSL + 1.6;
-  allFeaturesEnu.forEach(p => {
-    if (p.minDist > renderRadius) return;
-    // Min/max altitude in this surface
-    let minA = Infinity, maxA = -Infinity;
-    p.rings.forEach(ring => ring.forEach(([lon, lat, alt]) => {
-      if (alt < minA) minA = alt;
-      if (alt > maxA) maxA = alt;
-    }));
-    const heightAboveEye = minA - eyeMSL;
-    const angleDeg = Math.atan(heightAboveEye / p.minDist) * 180 / Math.PI;
-    showLog(`${p.name}:`);
-    showLog(`  MSL: ${minA.toFixed(0)}-${maxA.toFixed(0)}m`);
-    showLog(`  Dist: ${p.minDist.toFixed(0)}m, Angle: ${angleDeg.toFixed(1)}°`);
-  });
 }
 
 function computeFeaturesCentroid(geojson) {
-  let sumLat = 0, sumLon = 0, n = 0;
-  function w(c) { if (typeof c[0]==='number'){sumLon+=c[0];sumLat+=c[1];n++;} else c.forEach(w); }
+  let sumLat=0, sumLon=0, n=0;
+  function w(c){ if(typeof c[0]==='number'){sumLon+=c[0];sumLat+=c[1];n++;} else c.forEach(w); }
   geojson.features.forEach(f => w(f.geometry.coordinates));
-  return n === 0 ? null : { lat: sumLat/n, lon: sumLon/n };
+  return n===0 ? null : { lat: sumLat/n, lon: sumLon/n };
 }
 function shiftAllCoords(geojson, dLat, dLon) {
-  function w(c) { if (typeof c[0]==='number'){c[0]+=dLon;c[1]+=dLat;} else c.forEach(w); }
+  function w(c){ if(typeof c[0]==='number'){c[0]+=dLon;c[1]+=dLat;} else c.forEach(w); }
   geojson.features.forEach(f => w(f.geometry.coordinates));
 }
 
-// ENU coordinates with camera at origin
-// Camera eye is at MSL = userGroundMSL + 1.6
-// Surface alt MSL is converted to Y relative to eye:
-//   Y = surface_alt_msl - eye_msl
-function llToCamRelative(lat, lon, alt) {
+// World position relative to camera (camera at 0,0,0; eye at MSL = ground+1.6)
+function llToCamRel(lat, lon, alt) {
   const R = 6378137;
   const dLat = (lat - anchorPos.lat) * Math.PI / 180;
   const dLon = (lon - anchorPos.lon) * Math.PI / 180;
@@ -435,11 +409,10 @@ function llToCamRelative(lat, lon, alt) {
   const east = dLon * R * Math.cos(refLat);
   const north = dLat * R;
   const eyeMSL = userGroundMSL + 1.6;
-  const y = (alt || 0) - eyeMSL + surfaceOffsetY;
-  return { x: east, y: y, z: -north };
+  return { x: east, y: (alt || 0) - eyeMSL + surfaceOffsetY, z: -north };
 }
 
-function horizDistFromAnchor(lat, lon) {
+function horizDist(lat, lon) {
   const R = 6378137;
   const dLat = (lat - anchorPos.lat) * Math.PI / 180;
   const dLon = (lon - anchorPos.lon) * Math.PI / 180;
@@ -449,6 +422,9 @@ function horizDistFromAnchor(lat, lon) {
   return Math.sqrt(east*east + north*north);
 }
 
+// ============================================================
+// OLS surfaces
+// ============================================================
 function precomputeFeatures() {
   allFeaturesEnu = [];
   surfaceData.features.forEach((feat, idx) => {
@@ -461,38 +437,31 @@ function precomputeFeatures() {
     polygons.forEach((rings) => {
       let minDist = Infinity;
       rings.forEach(ring => ring.forEach(([lon, lat]) => {
-        const d = horizDistFromAnchor(lat, lon);
+        const d = horizDist(lat, lon);
         if (d < minDist) minDist = d;
       }));
       allFeaturesEnu.push({ name, color, rings, minDist });
     });
   });
-  showLog(`Pre-computed ${allFeaturesEnu.length} polys`);
+  showLog(`OLS: ${allFeaturesEnu.length} polys`);
 }
 
 function renderSurfaces() {
   surfaceMeshes.forEach(m => worldGroup.remove(m));
   surfaceMeshes = [];
-  let polyCount = 0, totalTris = 0, skipped = 0;
+  let n = 0;
   allFeaturesEnu.forEach(p => {
-    if (p.minDist > renderRadius) { skipped++; return; }
-    const mesh = createPolygonMesh(p.rings, p.color, p.name);
-    if (mesh) {
-      worldGroup.add(mesh);
-      surfaceMeshes.push(mesh);
-      polyCount++;
-      totalTris += mesh.userData.triCount || 0;
-    }
+    if (p.minDist > renderRadius) return;
+    const mesh = createPolygonMesh(p.rings, p.color, p.name, 0.4);
+    if (mesh) { worldGroup.add(mesh); surfaceMeshes.push(mesh); n++; }
   });
-  showLog(`✓ Rendered ${polyCount} polys, ${totalTris} tris`);
+  showLog(`Rendered OLS: ${n}`);
 }
 
-function createPolygonMesh(rings, color, name) {
+function createPolygonMesh(rings, color, name, opacity) {
   const outer = rings[0];
   if (!outer || outer.length < 3) return null;
-  const flat2D = [];
-  const pos3D = [];
-  const holeIdx = [];
+  const flat2D = [], pos3D = [], holeIdx = [];
   let vIdx = 0;
   rings.forEach((ring, ri) => {
     if (ri > 0) holeIdx.push(vIdx);
@@ -501,7 +470,7 @@ function createPolygonMesh(rings, color, name) {
       ring[0][1] === ring[ring.length-1][1]) ? ring.length - 1 : ring.length;
     for (let i = 0; i < lastIdx; i++) {
       const [lon, lat, alt] = ring[i];
-      const c = llToCamRelative(lat, lon, alt);
+      const c = llToCamRel(lat, lon, alt);
       flat2D.push(c.x, c.z);
       pos3D.push(c.x, c.y, c.z);
       vIdx++;
@@ -514,20 +483,18 @@ function createPolygonMesh(rings, color, name) {
   geom.setIndex(tris);
   geom.computeVertexNormals();
   const mat = new THREE.MeshBasicMaterial({
-    color: color, transparent: true, opacity: 0.4,
+    color: color, transparent: true, opacity: opacity,
     side: THREE.DoubleSide, depthWrite: false
   });
   const mesh = new THREE.Mesh(geom, mat);
   mesh.name = name;
-  mesh.userData = { name, triCount: tris.length / 3 };
-  // Wireframe child
+  mesh.userData = { name, kind: 'surface' };
   mesh.add(new THREE.Mesh(geom, new THREE.MeshBasicMaterial({
-    color: color, wireframe: true, transparent: true, opacity: 0.85
+    color: color, wireframe: true, transparent: true, opacity: 0.75
   })));
-  // Outline
   const outPts = [];
   outer.forEach(([lon, lat, alt]) => {
-    const c = llToCamRelative(lat, lon, alt);
+    const c = llToCamRel(lat, lon, alt);
     outPts.push(new THREE.Vector3(c.x, c.y, c.z));
   });
   mesh.add(new THREE.Line(
@@ -537,62 +504,317 @@ function createPolygonMesh(rings, color, name) {
   return mesh;
 }
 
+// ============================================================
+// Height blocks
+// ============================================================
+function precomputeBlocks() {
+  allBlocksEnu = [];
+  heightBlockData.features.forEach((feat, idx) => {
+    if (feat.geometry.type !== 'Polygon') return;
+    const ring = feat.geometry.coordinates[0];
+    if (!ring || ring.length < 3) return;
+
+    // Compute centroid + min dist
+    let sumLat = 0, sumLon = 0, n = 0;
+    let minDist = Infinity;
+    ring.forEach(([lon, lat]) => {
+      sumLon += lon; sumLat += lat; n++;
+      const d = horizDist(lat, lon);
+      if (d < minDist) minDist = d;
+    });
+    const cLat = sumLat / n, cLon = sumLon / n;
+
+    const maxH = parseFloat(feat.properties.max_height_allowance);
+    if (isNaN(maxH)) return;
+
+    allBlocksEnu.push({
+      ring, minDist, centroidLat: cLat, centroidLon: cLon,
+      maxHeight: maxH,
+      name: feat.properties.Name || 'Block',
+      designator: feat.properties.designator || ''
+    });
+  });
+  showLog(`Blocks: ${allBlocksEnu.length} total`);
+}
+
+function renderHeightBlocks() {
+  blockMeshes.forEach(m => worldGroup.remove(m));
+  blockMeshes = [];
+  labelSprites.forEach(s => worldGroup.remove(s));
+  labelSprites = [];
+
+  let n = 0;
+  allBlocksEnu.forEach(b => {
+    if (b.minDist > blockRadius) return;
+    const mesh = createBlockMesh(b);
+    if (mesh) {
+      worldGroup.add(mesh);
+      blockMeshes.push(mesh);
+      n++;
+      if (showLabels) {
+        const sprite = createLabelSprite(b);
+        if (sprite) { worldGroup.add(sprite); labelSprites.push(sprite); }
+      }
+    }
+  });
+  showLog(`Rendered blocks: ${n} (labels: ${labelSprites.length})`);
+}
+
+function createBlockMesh(block) {
+  const ring = block.ring;
+  // Sample ground at centroid for Z
+  let groundMSL = sampleDTM(block.centroidLat, block.centroidLon);
+  if (groundMSL === null) groundMSL = userGroundMSL;
+  // Place block slightly above ground (1m) so it doesn't z-fight with terrain
+  const blockMSL = groundMSL + 1;
+
+  const flat2D = [], pos3D = [];
+  const lastIdx = (ring.length > 1 &&
+    ring[0][0] === ring[ring.length-1][0] &&
+    ring[0][1] === ring[ring.length-1][1]) ? ring.length - 1 : ring.length;
+  for (let i = 0; i < lastIdx; i++) {
+    const [lon, lat] = ring[i];
+    const c = llToCamRel(lat, lon, blockMSL);
+    flat2D.push(c.x, c.z);
+    pos3D.push(c.x, c.y, c.z);
+  }
+  const tris = earcut(flat2D, null, 2);
+  if (tris.length === 0) return null;
+
+  const color = getHeightBlockColor(block.maxHeight);
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute('position', new THREE.Float32BufferAttribute(pos3D, 3));
+  geom.setIndex(tris);
+  geom.computeVertexNormals();
+
+  const mat = new THREE.MeshBasicMaterial({
+    color: color, transparent: true, opacity: 0.55,
+    side: THREE.DoubleSide, depthWrite: false
+  });
+  const mesh = new THREE.Mesh(geom, mat);
+  mesh.userData = {
+    kind: 'block',
+    name: `${block.name} ${block.designator}`,
+    maxHeight: block.maxHeight,
+    groundMSL: groundMSL
+  };
+
+  // Outline
+  const outPts = [];
+  for (let i = 0; i < lastIdx; i++) {
+    const [lon, lat] = ring[i];
+    const c = llToCamRel(lat, lon, blockMSL);
+    outPts.push(new THREE.Vector3(c.x, c.y, c.z));
+  }
+  outPts.push(outPts[0]);
+  mesh.add(new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints(outPts),
+    new THREE.LineBasicMaterial({ color: color })
+  ));
+
+  return mesh;
+}
+
+// Create text label as sprite using canvas
+function createLabelSprite(block) {
+  let groundMSL = sampleDTM(block.centroidLat, block.centroidLon);
+  if (groundMSL === null) groundMSL = userGroundMSL;
+  const c = llToCamRel(block.centroidLat, block.centroidLon, groundMSL + 2);
+
+  // Create canvas texture
+  const canvas = document.createElement('canvas');
+  canvas.width = 128; canvas.height = 64;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = 'rgba(0,0,0,0.7)';
+  ctx.fillRect(0, 0, 128, 64);
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 36px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(String(Math.round(block.maxHeight)), 64, 32);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.minFilter = THREE.LinearFilter;
+  const mat = new THREE.SpriteMaterial({
+    map: texture, transparent: true, depthWrite: false, depthTest: false
+  });
+  const sprite = new THREE.Sprite(mat);
+  sprite.position.set(c.x, c.y, c.z);
+  // Scale based on distance — labels should be ~5m wide regardless of distance
+  const dist = Math.sqrt(c.x*c.x + c.y*c.y + c.z*c.z);
+  const scale = Math.max(5, dist * 0.04);
+  sprite.scale.set(scale, scale * 0.5, 1);
+  sprite.userData = { kind: 'label' };
+  return sprite;
+}
+
+// ============================================================
+// Terrain mesh from DTM
+// ============================================================
+function renderTerrain() {
+  if (!dtmData) { showLog('No DTM for terrain'); return; }
+  if (terrainMesh) {
+    worldGroup.remove(terrainMesh);
+    terrainMesh.geometry.dispose();
+    terrainMesh = null;
+  }
+
+  const { bbox, width, height, resolution_deg } = dtmHeader;
+  // Convert terrainRadius (meters) to degrees roughly
+  const mPerDegLat = 111320;
+  const mPerDegLon = 111320 * Math.cos(anchorPos.lat * Math.PI / 180);
+  const dLat = terrainRadius / mPerDegLat;
+  const dLon = terrainRadius / mPerDegLon;
+
+  const minLat = Math.max(bbox.south, anchorPos.lat - dLat);
+  const maxLat = Math.min(bbox.north, anchorPos.lat + dLat);
+  const minLon = Math.max(bbox.west, anchorPos.lon - dLon);
+  const maxLon = Math.min(bbox.east, anchorPos.lon + dLon);
+
+  const resLat = resolution_deg.lat;
+  const resLon = resolution_deg.lon;
+
+  // Compute pixel range in DTM
+  const px0 = Math.max(0, Math.floor((minLon - bbox.west) / (bbox.east - bbox.west) * (width - 1)));
+  const px1 = Math.min(width - 1, Math.ceil((maxLon - bbox.west) / (bbox.east - bbox.west) * (width - 1)));
+  const py0 = Math.max(0, Math.floor((bbox.north - maxLat) / (bbox.north - bbox.south) * (height - 1)));
+  const py1 = Math.min(height - 1, Math.ceil((bbox.north - minLat) / (bbox.north - bbox.south) * (height - 1)));
+
+  const cols = px1 - px0 + 1;
+  const rows = py1 - py0 + 1;
+  showLog(`Terrain: ${cols}x${rows} cells`);
+
+  if (cols < 2 || rows < 2) { showLog('Terrain area too small'); return; }
+  if (cols * rows > 50000) {
+    showLog(`Terrain too large (${cols*rows}), reduce radius`, true);
+    return;
+  }
+
+  const positions = [];
+  const indices = [];
+  const colors = [];
+
+  for (let row = 0; row < rows; row++) {
+    for (let col = 0; col < cols; col++) {
+      const x = px0 + col;
+      const y = py0 + row;
+      // DTM lat/lon for this cell
+      const lon = bbox.west + (x / (width - 1)) * (bbox.east - bbox.west);
+      const lat = bbox.north - (y / (height - 1)) * (bbox.north - bbox.south);
+      let alt = dtmData[y * width + x];
+      if (alt === dtmHeader.nodata) alt = userGroundMSL;
+      const c = llToCamRel(lat, lon, alt);
+      positions.push(c.x, c.y, c.z);
+
+      // Color terrain by elevation: blue (low) → green → brown (high)
+      const eleNorm = Math.max(0, Math.min(1, (alt - 0) / 200));
+      const tcol = new THREE.Color();
+      tcol.setHSL(0.3 - eleNorm * 0.2, 0.5, 0.4 + eleNorm * 0.2);
+      colors.push(tcol.r, tcol.g, tcol.b);
+    }
+  }
+
+  // Build triangle indices
+  for (let row = 0; row < rows - 1; row++) {
+    for (let col = 0; col < cols - 1; col++) {
+      const a = row * cols + col;
+      const b = row * cols + col + 1;
+      const c = (row + 1) * cols + col;
+      const d = (row + 1) * cols + col + 1;
+      indices.push(a, c, b);
+      indices.push(b, c, d);
+    }
+  }
+
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geom.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  geom.setIndex(indices);
+  geom.computeVertexNormals();
+
+  const mat = new THREE.MeshBasicMaterial({
+    vertexColors: true, transparent: true, opacity: 0.5,
+    side: THREE.DoubleSide, wireframe: false
+  });
+  terrainMesh = new THREE.Mesh(geom, mat);
+  terrainMesh.userData = { kind: 'terrain' };
+  worldGroup.add(terrainMesh);
+
+  // Wireframe overlay
+  const wireMat = new THREE.MeshBasicMaterial({
+    color: 0xffffff, wireframe: true, transparent: true, opacity: 0.15
+  });
+  terrainMesh.add(new THREE.Mesh(geom, wireMat));
+
+  showLog(`✓ Terrain rendered`);
+}
+
+// ============================================================
+// Debug markers
+// ============================================================
 function renderDebugMarkers() {
   const dist = 30;
-  const markers = [
+  const ms = [
     { x: 0, z: -dist, color: 0xff0000 },
     { x: dist, z: 0, color: 0x00ff00 },
     { x: 0, z: dist, color: 0xffff00 },
     { x: -dist, z: 0, color: 0x00ffff },
   ];
-  markers.forEach(m => {
+  ms.forEach(m => {
     const pillar = new THREE.Mesh(
       new THREE.CylinderGeometry(2, 2, 20, 8),
       new THREE.MeshBasicMaterial({ color: m.color })
     );
-    pillar.position.set(m.x, 0, m.z); // centered at eye level
+    pillar.position.set(m.x, 0, m.z);
     worldGroup.add(pillar);
-    const sphere = new THREE.Mesh(
-      new THREE.SphereGeometry(5, 12, 12),
-      new THREE.MeshBasicMaterial({ color: m.color, transparent: true, opacity: 0.7 })
-    );
-    sphere.position.set(m.x, 12, m.z);
-    worldGroup.add(sphere);
   });
-
-  // TEST BOX always in front of camera (in scene, not worldGroup)
-  const testBox = new THREE.Mesh(
-    new THREE.BoxGeometry(1, 1, 1),
-    new THREE.MeshBasicMaterial({ color: 0xff00ff })
-  );
-  testBox.position.set(0, 0, -5);
-  scene.add(testBox);
 }
 
-function adjustHeight(delta) {
-  surfaceOffsetY += delta;
-  showLog(`Surface Y offset: ${surfaceOffsetY}`);
+// ============================================================
+// Controls
+// ============================================================
+function adjustHeight(d) {
+  surfaceOffsetY += d;
+  showLog(`Surf Y: ${surfaceOffsetY}`);
+  // Apply only to OLS (not blocks/terrain which are tied to ground)
   surfaceMeshes.forEach(mesh => {
     const arr = mesh.geometry.attributes.position.array;
-    for (let i = 1; i < arr.length; i += 3) arr[i] += delta;
+    for (let i = 1; i < arr.length; i += 3) arr[i] += d;
     mesh.geometry.attributes.position.needsUpdate = true;
     mesh.children.forEach(child => {
       if (child.type === 'Line') {
         const ca = child.geometry.attributes.position.array;
-        for (let i = 1; i < ca.length; i += 3) ca[i] += delta;
+        for (let i = 1; i < ca.length; i += 3) ca[i] += d;
         child.geometry.attributes.position.needsUpdate = true;
       }
     });
   });
 }
 
-function adjustHeading(delta) {
-  headingOffset = (headingOffset + delta) % 360;
+function adjustHeading(d) {
+  headingOffset = (headingOffset + d) % 360;
   showLog(`Heading offset: ${headingOffset}°`);
 }
 
+function toggleLayer(name) {
+  if (name === 'terrain') {
+    showTerrain = !showTerrain;
+    if (terrainMesh) terrainMesh.visible = showTerrain;
+    showLog(`Terrain: ${showTerrain ? 'on' : 'off'}`);
+  } else if (name === 'blocks') {
+    showBlocks = !showBlocks;
+    blockMeshes.forEach(m => m.visible = showBlocks);
+    labelSprites.forEach(s => s.visible = showBlocks && showLabels);
+    showLog(`Blocks: ${showBlocks ? 'on' : 'off'}`);
+  } else if (name === 'labels') {
+    showLabels = !showLabels;
+    labelSprites.forEach(s => s.visible = showBlocks && showLabels);
+    showLog(`Labels: ${showLabels ? 'on' : 'off'}`);
+  }
+}
+
 // ============================================================
-// Status loops
+// Status loop
 // ============================================================
 function startStatusLoop() {
   setInterval(() => {
@@ -603,44 +825,71 @@ function startStatusLoop() {
       <div class="row"><span class="label">Acc</span><span class="${accClass}">±${userPos.acc.toFixed(0)}m</span></div>
       <div class="row"><span class="label">Hdg</span><span>${userHeading.toFixed(0)}° (off ${headingOffset}°)</span></div>
       <div class="row"><span class="label">Ground</span><span>${userGroundMSL ? userGroundMSL.toFixed(1) + 'm' : '-'}</span></div>
-      <div class="row"><span class="label">Eye MSL</span><span>${userGroundMSL ? (userGroundMSL+1.6).toFixed(1) + 'm' : '-'}</span></div>
-      <div class="row"><span class="label">Surf-Y</span><span>${surfaceOffsetY}m</span></div>
-      <div class="row"><span class="label">Meshes</span><span>${surfaceMeshes.length}</span></div>
+      <div class="row"><span class="label">OLS</span><span>${surfaceMeshes.length} | Blk: ${blockMeshes.length} | Ter: ${terrainMesh ? 'y' : 'n'}</span></div>
     `;
     setStatus(html);
   }, 500);
 }
 
-// Update aim info under crosshair
+// ============================================================
+// Aim info — raycast to find what crosshair is pointing at
+// ============================================================
 function startAimInfoLoop() {
   const aimEl = document.getElementById('aim-info');
   setInterval(() => {
-    if (!camera || !surfaceMeshes.length) {
-      aimEl.textContent = '';
-      return;
-    }
-    // Raycast from camera forward
+    if (!camera || !worldGroup) return;
     const raycaster = new THREE.Raycaster();
     raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
     raycaster.far = 50000;
-    // Cast against all surface meshes (collect their geometries)
-    const targets = [];
+
+    // Collect targets by kind
+    const surfaceTargets = [];
+    const blockTargets = [];
+    const terrainTargets = [];
     surfaceMeshes.forEach(m => {
-      targets.push(m);
-      m.children.forEach(c => { if (c.type === 'Mesh') targets.push(c); });
+      surfaceTargets.push(m);
+      m.children.forEach(c => { if (c.type === 'Mesh') surfaceTargets.push(c); });
     });
-    const hits = raycaster.intersectObjects(targets, false);
-    if (hits.length > 0) {
-      const h = hits[0];
-      const dist = h.distance;
-      const surfMSL = h.point.y + (userGroundMSL + 1.6);
-      const heightAboveEye = h.point.y;
-      aimEl.textContent =
-        `${h.object.parent?.name || h.object.name || '?'}\n` +
-        `${dist.toFixed(0)}m | MSL ${surfMSL.toFixed(0)}m | ${heightAboveEye>=0?'+':''}${heightAboveEye.toFixed(0)}m above eye`;
-    } else {
-      aimEl.textContent = '— ไม่ได้เล็ง surface —';
+    blockMeshes.forEach(m => blockTargets.push(m));
+    if (terrainMesh) {
+      terrainTargets.push(terrainMesh);
+      terrainMesh.children.forEach(c => { if (c.type === 'Mesh') terrainTargets.push(c); });
     }
+
+    const eyeMSL = userGroundMSL + 1.6;
+    let txt = '';
+
+    // Surface
+    const sHits = raycaster.intersectObjects(surfaceTargets, false);
+    if (sHits.length > 0) {
+      const h = sHits[0];
+      const surfMSL = h.point.y + eyeMSL - surfaceOffsetY;
+      const obj = h.object.parent?.userData?.kind === 'surface' ? h.object.parent : h.object;
+      txt += `${obj.userData?.name || obj.name || 'Surface'}\n`;
+      txt += `${h.distance.toFixed(0)}m | MSL ${surfMSL.toFixed(0)}m\n`;
+    }
+
+    // Block
+    const bHits = raycaster.intersectObjects(blockTargets, false);
+    if (bHits.length > 0) {
+      const h = bHits[0];
+      const ud = h.object.userData;
+      txt += `─────────\n`;
+      txt += `BLK ${ud.name || ''}\n`;
+      txt += `Max H: ${ud.maxHeight}m\n`;
+      txt += `Ground: ${ud.groundMSL ? ud.groundMSL.toFixed(0) : '?'}m MSL\n`;
+    }
+
+    // Terrain
+    const tHits = raycaster.intersectObjects(terrainTargets, false);
+    if (tHits.length > 0) {
+      const h = tHits[0];
+      const terMSL = h.point.y + eyeMSL;
+      txt += `─────────\n`;
+      txt += `Terrain ${terMSL.toFixed(0)}m MSL`;
+    }
+
+    aimEl.textContent = txt || '— ไม่ได้เล็งอะไร —';
   }, 200);
 }
 
@@ -653,9 +902,7 @@ function startMinimapLoop() {
   const ctx = canvas.getContext('2d');
   const W = canvas.width, H = canvas.height;
   function draw() {
-    if (!anchorPos || allFeaturesEnu.length === 0) {
-      requestAnimationFrame(draw); return;
-    }
+    if (!anchorPos) { requestAnimationFrame(draw); return; }
     ctx.fillStyle = 'rgba(0,0,0,0.7)';
     ctx.fillRect(0, 0, W, H);
     const cx = W/2, cy = H/2;
@@ -678,6 +925,8 @@ function startMinimapLoop() {
     ctx.fillText('W', 8, cy + 4);
 
     const headingRad = (userHeading - headingOffset) * Math.PI / 180;
+
+    // OLS surfaces
     allFeaturesEnu.forEach(p => {
       const colorHex = '#' + p.color.toString(16).padStart(6, '0');
       ctx.strokeStyle = colorHex;
@@ -686,7 +935,7 @@ function startMinimapLoop() {
       ctx.beginPath();
       const ring = p.rings[0];
       ring.forEach(([lon, lat, alt], i) => {
-        const c = llToCamRelative(lat, lon, alt);
+        const c = llToCamRel(lat, lon, alt || 0);
         const rx = c.x * Math.cos(-headingRad) - (-c.z) * Math.sin(-headingRad);
         const ry = c.x * Math.sin(-headingRad) + (-c.z) * Math.cos(-headingRad);
         const px = cx + rx * scale;
@@ -697,6 +946,8 @@ function startMinimapLoop() {
       ctx.fill();
       ctx.stroke();
     });
+
+    // User
     ctx.fillStyle = '#ffffff';
     ctx.beginPath();
     ctx.arc(cx, cy, 4, 0, Math.PI * 2);
