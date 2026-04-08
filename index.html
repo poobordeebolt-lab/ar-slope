@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>AR OLS Surface Viewer</title>
+  <title>AR OLS Surface Viewer v3</title>
 
   <script src="https://aframe.io/releases/1.4.0/aframe.min.js"></script>
   <script src="https://raw.githack.com/AR-js-org/AR.js/master/aframe/build/aframe-ar-nft.js"></script>
@@ -14,10 +14,10 @@
     #ui {
       position: fixed; top: 0; left: 0; right: 0;
       background: rgba(0,0,0,0.78); color: white;
-      padding: 8px 10px; z-index: 1000;
-      font-size: 12px; max-height: 45vh; overflow-y: auto;
+      padding: 6px 10px; z-index: 1000;
+      font-size: 11px; max-height: 30vh; overflow-y: auto;
     }
-    #ui h3 { margin: 0 0 4px 0; font-size: 13px; }
+    #ui h3 { margin: 0 0 3px 0; font-size: 12px; }
     #status { font-family: monospace; font-size: 10px; line-height: 1.4; }
     .row { display: flex; justify-content: space-between; }
     .label { opacity: 0.7; }
@@ -27,104 +27,155 @@
       position: fixed; top: 50%; left: 50%;
       transform: translate(-50%, -50%);
       background: rgba(20,20,30,0.97); color: white;
-      padding: 20px; border-radius: 14px;
+      padding: 18px; border-radius: 14px;
       z-index: 2000; text-align: center;
-      width: 88%; max-width: 360px;
+      width: 90%; max-width: 360px;
       box-shadow: 0 10px 40px rgba(0,0,0,0.6);
+      max-height: 92vh; overflow-y: auto;
     }
-    #file-input h3 { margin-top: 0; }
+    #file-input h3 { margin: 0 0 8px 0; font-size: 16px; }
     #file-input button {
-      display: block; width: 100%; padding: 12px; margin: 8px 0;
+      display: block; width: 100%; padding: 11px; margin: 6px 0;
       background: #2563eb; color: white; border: none;
-      border-radius: 8px; font-size: 14px; cursor: pointer;
+      border-radius: 8px; font-size: 13px; cursor: pointer;
       box-sizing: border-box; font-weight: 600;
     }
-    #file-input button:disabled {
-      background: #444; color: #888; cursor: not-allowed;
-    }
-    #file-input button.start-btn {
-      background: #16a34a;
-      font-size: 16px;
-      padding: 14px;
-    }
+    #file-input button:disabled { background: #444; color: #888; }
+    #file-input button.start-btn { background: #16a34a; font-size: 15px; padding: 13px; }
     #file-input button.start-btn:disabled { background: #444; }
     #file-input .file-label {
-      display: block; width: 100%; padding: 14px; margin: 8px 0;
+      display: block; width: 100%; padding: 12px; margin: 6px 0;
       background: #1e40af; color: white; border: 2px dashed #60a5fa;
-      border-radius: 8px; font-size: 14px; cursor: pointer;
+      border-radius: 8px; font-size: 13px; cursor: pointer;
       box-sizing: border-box; font-weight: 500;
-      transition: all 0.2s;
     }
-    .file-label.has-file {
-      background: #166534 !important;
-      border-color: #4ade80 !important;
-    }
+    .file-label.has-file { background: #166534 !important; border-color: #4ade80 !important; }
     #file-input input[type=file] { display: none; }
-    #file-input p { font-size: 11px; opacity: 0.75; margin: 6px 0; }
     #file-status {
-      font-size: 11px; padding: 8px;
+      font-size: 10px; padding: 6px;
       background: rgba(0,0,0,0.4); border-radius: 6px;
-      margin: 8px 0; min-height: 18px;
+      margin: 6px 0; min-height: 16px;
       font-family: monospace;
     }
     .opts {
-      display: flex; gap: 8px; align-items: center;
-      justify-content: space-between; margin: 10px 0; font-size: 12px;
-      padding: 8px; background: rgba(255,255,255,0.05); border-radius: 6px;
+      display: flex; gap: 6px; align-items: center;
+      justify-content: space-between; margin: 6px 0; font-size: 11px;
+      padding: 6px 8px; background: rgba(255,255,255,0.05); border-radius: 6px;
     }
     .opts input[type=number] {
-      width: 80px; padding: 6px; border-radius: 6px;
-      border: 1px solid #555; background: #222; color: white; font-size: 12px;
+      width: 70px; padding: 5px; border-radius: 6px;
+      border: 1px solid #555; background: #222; color: white; font-size: 11px;
     }
     .opts label.checkbox {
-      display: flex; align-items: center; gap: 8px;
-      width: 100%; cursor: pointer; font-size: 13px;
+      display: flex; align-items: center; gap: 6px;
+      width: 100%; cursor: pointer; font-size: 12px;
     }
-    .opts input[type=checkbox] {
-      width: 18px; height: 18px; cursor: pointer;
+    .opts input[type=checkbox] { width: 16px; height: 16px; }
+
+    /* Mini-map */
+    #minimap-container {
+      position: fixed;
+      bottom: 60px; right: 8px;
+      z-index: 1100;
+      background: rgba(0,0,0,0.75);
+      border: 2px solid #4ade80;
+      border-radius: 50%;
+      padding: 4px;
+      display: none;
+    }
+    #minimap {
+      display: block;
+      border-radius: 50%;
+    }
+    #minimap-label {
+      position: fixed;
+      bottom: 230px; right: 8px;
+      color: #4ade80;
+      font-size: 9px;
+      font-family: monospace;
+      z-index: 1100;
+      background: rgba(0,0,0,0.7);
+      padding: 2px 6px;
+      border-radius: 4px;
+      display: none;
     }
 
     #legend {
-      position: fixed; bottom: 10px; left: 10px; right: 10px;
+      position: fixed; bottom: 8px; left: 8px; right: 8px;
       background: rgba(0,0,0,0.78); color: white;
-      padding: 6px 10px; border-radius: 8px;
-      font-size: 10px; z-index: 1000;
-      display: flex; flex-wrap: wrap; gap: 8px; justify-content: center;
+      padding: 5px 8px; border-radius: 8px;
+      font-size: 9px; z-index: 1000;
+      display: flex; flex-wrap: wrap; gap: 6px; justify-content: center;
     }
-    .swatch { display: inline-block; width: 10px; height: 10px; margin-right: 4px; vertical-align: middle; border-radius: 2px; }
+    .swatch { display: inline-block; width: 9px; height: 9px; margin-right: 3px; vertical-align: middle; border-radius: 2px; }
 
     #log {
-      position: fixed; top: 50%; left: 10px; right: 10px;
-      transform: translateY(-50%);
-      background: rgba(0,0,0,0.85); color: #4ade80;
-      padding: 10px; border-radius: 8px;
-      font-family: monospace; font-size: 10px;
-      z-index: 1500; max-height: 60vh; overflow-y: auto;
+      position: fixed; top: 32%; left: 8px; right: 8px;
+      background: rgba(0,0,0,0.88); color: #4ade80;
+      padding: 8px; border-radius: 8px;
+      font-family: monospace; font-size: 9px;
+      z-index: 1500; max-height: 35vh; overflow-y: auto;
       display: none; white-space: pre-wrap;
+    }
+
+    /* Floating controls */
+    #floating-ctrl {
+      position: fixed; right: 8px; top: 32%;
+      display: none;
+      flex-direction: column; gap: 6px;
+      z-index: 1100;
+    }
+    #floating-ctrl button {
+      width: 44px; height: 44px;
+      border-radius: 50%;
+      border: none;
+      background: rgba(37, 99, 235, 0.9);
+      color: white;
+      font-size: 18px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.5);
     }
   </style>
 </head>
 <body>
 
 <div id="file-input">
-  <h3>AR OLS Surface Viewer</h3>
+  <h3>AR OLS Viewer v3</h3>
 
   <label for="geojson-file" class="file-label" id="file-label">
-    📂 แตะเพื่อเลือกไฟล์ GeoJSON
+    📂 แตะเพื่อเลือกไฟล์
   </label>
   <input type="file" id="geojson-file" accept=".geojson,.json,application/json">
 
   <div id="file-status">ยังไม่ได้เลือกไฟล์</div>
 
   <div class="opts">
-    <span>รัศมีแสดงผล:</span>
-    <span><input type="number" id="render-radius" value="5000" min="200" max="20000" step="500"> m</span>
+    <span>รัศมี:</span>
+    <span><input type="number" id="render-radius" value="8000" min="200" max="20000" step="500"> m</span>
+  </div>
+
+  <div class="opts">
+    <span>Surface สูง (เริ่ม):</span>
+    <span><input type="number" id="surface-offset" value="-30" min="-200" max="200" step="5"> m</span>
   </div>
 
   <div class="opts">
     <label class="checkbox">
-      <input type="checkbox" id="test-mode" checked>
-      <span>โหมดทดสอบ (วาง surface ตรงตำแหน่งฉัน) ⭐</span>
+      <input type="checkbox" id="auto-fit" checked>
+      <span>Auto-fit สูง (ดึงลงให้เห็น)</span>
+    </label>
+  </div>
+
+  <div class="opts">
+    <label class="checkbox">
+      <input type="checkbox" id="debug-markers" checked>
+      <span>แสดง debug markers (N/S/E/W)</span>
+    </label>
+  </div>
+
+  <div class="opts">
+    <label class="checkbox">
+      <input type="checkbox" id="test-mode">
+      <span>โหมดทดสอบ (วาง centroid ที่ฉัน)</span>
     </label>
   </div>
 
@@ -132,21 +183,31 @@
     ▶ เริ่มดู AR
   </button>
 
-  <p style="font-size:10px;opacity:0.6">อนุญาต Location + Camera + Motion sensors</p>
-  <p style="font-size:10px;opacity:0.5">ครั้งแรก แนะนำให้ติ๊ก "โหมดทดสอบ" ไว้</p>
+  <p style="font-size:9px;opacity:0.6;margin:4px 0">อนุญาต Location + Camera + Motion</p>
 </div>
 
 <div id="ui" style="display:none">
-  <h3>AR OLS Viewer</h3>
-  <div id="status">กำลังเริ่มต้น...</div>
+  <h3>AR OLS</h3>
+  <div id="status">เริ่มต้น...</div>
 </div>
 
 <div id="legend" style="display:none">
-  <div><span class="swatch" style="background:#3b82f6"></span>Inner Horizontal</div>
+  <div><span class="swatch" style="background:#3b82f6"></span>Inner H</div>
   <div><span class="swatch" style="background:#8b5cf6"></span>Conical</div>
   <div><span class="swatch" style="background:#22c55e"></span>Approach</div>
   <div><span class="swatch" style="background:#f59e0b"></span>Take-off</div>
-  <div><span class="swatch" style="background:#ec4899"></span>Transitional</div>
+  <div><span class="swatch" style="background:#ec4899"></span>Trans</div>
+</div>
+
+<div id="minimap-label">MAP (top-down)</div>
+<div id="minimap-container">
+  <canvas id="minimap" width="180" height="180"></canvas>
+</div>
+
+<div id="floating-ctrl">
+  <button onclick="adjustHeight(-10)" title="ลดความสูง surface">⬇</button>
+  <button onclick="adjustHeight(10)" title="เพิ่มความสูง surface">⬆</button>
+  <button onclick="toggleLog()" title="แสดง log">🔍</button>
 </div>
 
 <div id="log"></div>
@@ -161,9 +222,10 @@
 
   <a-entity id="anchor" gps-entity-place="latitude: 0; longitude: 0">
     <a-entity id="surfaces"></a-entity>
+    <a-entity id="debug"></a-entity>
   </a-entity>
 
-  <a-camera id="cam" gps-camera rotation-reader far="50000"></a-camera>
+  <a-camera id="cam" gps-camera rotation-reader far="100000"></a-camera>
 
 </a-scene>
 
