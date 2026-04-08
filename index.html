@@ -1,156 +1,71 @@
 <!DOCTYPE html>
 <html lang="th">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>AR Pre-Survey (New Absolute Coordinates)</title>
-  <script src="https://cdn.jsdelivr.net/npm/three@0.150.0/build/three.min.js"></script>
-  <script src="https://unpkg.com/earcut@2.2.4/dist/earcut.min.js"></script>
-  <style>
-    * { box-sizing: border-box; }
-    html, body { margin: 0; padding: 0; overflow: hidden; height: 100%; background: #111; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-    
-    #video-bg { position: fixed; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; z-index: 1; }
-    #ar-canvas { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 2; pointer-events: none; }
-    
-    #ui-setup {
-      position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-      background: rgba(15, 23, 42, 0.95); z-index: 100;
-      display: flex; flex-direction: column; align-items: center; justify-content: center;
-      overflow-y: auto; padding: 20px; color: white;
-    }
-    .setup-card {
-      background: #1e293b; padding: 20px; border-radius: 12px; width: 100%; max-width: 400px;
-      box-shadow: 0 10px 25px rgba(0,0,0,0.5);
-    }
-    .setup-card h2 { margin-top: 0; color: #38bdf8; font-size: 20px; text-align: center; }
-    .file-group { margin-bottom: 12px; }
-    .file-group label { display: block; font-size: 13px; margin-bottom: 4px; color: #94a3b8; }
-    .file-btn { display: block; width: 100%; background: #334155; color: white; border: 1px dashed #64748b; padding: 10px; text-align: center; border-radius: 6px; cursor: pointer; font-size: 14px; }
-    .file-btn.loaded { background: #064e3b; border-color: #10b981; color: #34d399; }
-    input[type="file"] { display: none; }
-    .setup-card button.start { width: 100%; background: #2563eb; color: white; border: none; padding: 14px; border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer; margin-top: 10px; }
-    .setup-card button.start:disabled { background: #475569; color: #94a3b8; cursor: not-allowed; }
-
-    #ui-ar {
-      position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 10; pointer-events: none; display: none;
-    }
-    .info-panel {
-      position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.7);
-      padding: 10px; border-radius: 8px; color: white; font-family: monospace; font-size: 11px;
-      pointer-events: auto; min-width: 200px;
-    }
-    .info-panel .hl { color: #34d399; font-weight: bold; }
-    .info-panel .warn { color: #fbbf24; }
-
-    .crosshair {
-      position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
-      width: 30px; height: 30px; pointer-events: none;
-    }
-    .crosshair::before { content: ''; position: absolute; top: 50%; left: 0; right: 0; height: 2px; background: rgba(255,255,255,0.8); transform: translateY(-50%); }
-    .crosshair::after { content: ''; position: absolute; left: 50%; top: 0; bottom: 0; width: 2px; background: rgba(255,255,255,0.8); transform: translateX(-50%); }
-
-    .target-info {
-      position: absolute; top: 55%; left: 50%; transform: translateX(-50%);
-      background: rgba(0,0,0,0.8); color: #38bdf8; padding: 8px 12px; border-radius: 6px;
-      font-family: monospace; font-size: 12px; white-space: pre; text-align: left;
-    }
-
-    .controls {
-      position: absolute; bottom: 20px; left: 10px; right: 10px;
-      background: rgba(0,0,0,0.7); border-radius: 8px; padding: 10px; pointer-events: auto;
-      display: flex; flex-direction: column; gap: 8px;
-    }
-    .control-row { display: flex; align-items: center; justify-content: space-between; color: white; font-size: 12px; }
-    .control-row input[type="range"] { flex: 1; margin: 0 10px; }
-    
-    .layer-toggles { display: flex; gap: 5px; margin-top: 5px; flex-wrap: wrap; }
-    .layer-btn { background: #334155; color: white; border: none; padding: 6px 10px; border-radius: 4px; font-size: 11px; cursor: pointer; }
-    .layer-btn.active { background: #2563eb; }
-
-    #log {
-      position: absolute; bottom: 120px; left: 10px; right: 10px; max-height: 100px;
-      background: rgba(0,0,0,0.6); color: #a3e635; font-family: monospace; font-size: 10px;
-      padding: 8px; border-radius: 6px; overflow-y: auto; pointer-events: auto;
-    }
-  </style>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
+<title>VTSS AR Pre-Survey</title>
+<link rel="stylesheet" href="style.css" />
 </head>
 <body>
+  <video id="cam" autoplay playsinline muted></video>
+  <canvas id="three"></canvas>
 
-<video id="video-bg" autoplay playsinline muted></video>
-<canvas id="ar-canvas"></canvas>
-
-<div id="ui-setup">
-  <div class="setup-card">
-    <h2>AR Pre-Survey (Absolute Elev)</h2>
-    
-    <div class="file-group">
-      <label>1. OLS GeoJSON (Ellipsoidal)</label>
-      <label class="file-btn" id="lbl-ols">Select OLS File
-        <input type="file" id="file-ols" accept=".geojson,.json">
-      </label>
+  <div id="hud">
+    <div class="row">
+      <div class="badge" id="status">กำลังเริ่มต้น…</div>
+      <div class="badge" id="fps">-- fps</div>
     </div>
-
-    <div class="file-group">
-      <label>2. OCS GeoJSON (Ellipsoidal)</label>
-      <label class="file-btn" id="lbl-ocs">Select OCS File
-        <input type="file" id="file-ocs" accept=".geojson,.json">
-      </label>
+    <div class="row">
+      <div class="badge">Lat <span id="lat">--</span></div>
+      <div class="badge">Lon <span id="lon">--</span></div>
+      <div class="badge">h <span id="hEll">--</span> m</div>
+      <div class="badge">±<span id="acc">--</span> m</div>
     </div>
-
-    <div class="file-group">
-      <label>3. Height Blocks GeoJSON (Optional)</label>
-      <label class="file-btn" id="lbl-hblock">Select Height Blocks
-        <input type="file" id="file-hblock" accept=".geojson,.json">
-      </label>
+    <div class="row">
+      <div class="badge">Heading <span id="hdg">--</span>°</div>
+      <div class="badge">Pitch <span id="ptc">--</span>°</div>
+      <div class="badge">Roll <span id="rll">--</span>°</div>
     </div>
-
-    <div class="file-group">
-      <label>4. DTM Header & Binary (Ellipsoidal Ground)</label>
-      <label class="file-btn" id="lbl-dtm-h" style="margin-bottom: 5px;">Select DTM .json
-        <input type="file" id="file-dtm-h" accept=".json">
-      </label>
-      <label class="file-btn" id="lbl-dtm-b">Select DTM .dtm
-        <input type="file" id="file-dtm-b" accept=".dtm,application/octet-stream">
-      </label>
-    </div>
-
-    <div style="margin-top: 15px; font-size: 12px; color: #cbd5e1;">
-      <label><input type="checkbox" id="chk-test"> Enable Test Mode (Shift surfaces to current GPS)</label>
-    </div>
-
-    <button class="start" id="btn-start" disabled>Start AR</button>
-  </div>
-</div>
-
-<div id="ui-ar">
-  <div class="info-panel" id="info-panel">
-    Waiting for GPS & DTM...
-  </div>
-  
-  <div id="log"></div>
-
-  <div class="crosshair"></div>
-  <div class="target-info" id="target-info"></div>
-
-  <div class="controls">
-    <div class="control-row">
-      <span>Camera FOV (<span id="val-fov">70</span>°)</span>
-      <input type="range" id="slide-fov" min="40" max="100" value="70">
-    </div>
-    <div class="control-row">
-      <span>Heading Offset (<span id="val-heading">0</span>°)</span>
-      <input type="range" id="slide-heading" min="-180" max="180" value="0">
-    </div>
-    <div class="layer-toggles">
-      <button class="layer-btn active" data-layer="ols">OLS</button>
-      <button class="layer-btn active" data-layer="ocs">OCS</button>
-      <button class="layer-btn active" data-layer="blocks">Blocks</button>
-      <button class="layer-btn active" data-layer="dtm">DTM Mesh</button>
+    <div class="row" id="surfRow">
+      <div class="badge">Surface ใต้ตำแหน่ง: <span id="surfBelow">--</span></div>
     </div>
   </div>
-</div>
 
-<script src="app.js"></script>
+  <div id="controls">
+    <button id="btnStart">เริ่มกล้อง + GPS</button>
+    <button id="btnCal">Calibrate Heading</button>
+    <label><input type="checkbox" id="chkOLS" checked> OLS</label>
+    <label><input type="checkbox" id="chkOCS" checked> OCS</label>
+    <label>Range
+      <select id="rangeSel">
+        <option value="1000">1 km</option>
+        <option value="3000" selected>3 km</option>
+        <option value="8000">8 km</option>
+        <option value="20000">20 km</option>
+      </select>
+    </label>
+    <label>Opacity <input type="range" id="opa" min="0.1" max="0.9" step="0.05" value="0.35"></label>
+  </div>
+
+  <div id="crosshair">+</div>
+
+  <div id="legend">
+    <div><span class="sw" style="background:#4fc3f7"></span>OLS Inner Horizontal</div>
+    <div><span class="sw" style="background:#81c784"></span>OLS Conical</div>
+    <div><span class="sw" style="background:#ffb74d"></span>OLS Approach</div>
+    <div><span class="sw" style="background:#ff8a65"></span>OLS Take-off</div>
+    <div><span class="sw" style="background:#ba68c8"></span>OLS Transitional</div>
+    <div><span class="sw" style="background:#e57373"></span>OCS Area 2</div>
+  </div>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+  <script type="module" src="js/app.js"></script>
 </body>
 </html>
