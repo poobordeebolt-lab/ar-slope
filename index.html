@@ -3,14 +3,14 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>AR OLS Viewer v8 (true MSL)</title>
+  <title>AR OLS Viewer v9</title>
 
   <script src="https://cdn.jsdelivr.net/npm/three@0.150.0/build/three.min.js"></script>
   <script src="https://unpkg.com/earcut@2.2.4/dist/earcut.min.js"></script>
 
   <style>
     * { box-sizing: border-box; }
-    html, body { margin: 0; padding: 0; overflow: hidden; height: 100%; background: #000; font-family: -apple-system, sans-serif; }
+    html, body { margin: 0; padding: 0; overflow: hidden; height: 100%; background: #000; font-family: -apple-system, sans-serif; -webkit-tap-highlight-color: transparent; }
 
     #cam-video { position: fixed; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; z-index: 1; }
     #three-canvas { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 2; pointer-events: none; }
@@ -29,7 +29,7 @@
       position: fixed; top: 0; left: 0; right: 0;
       background: rgba(0,0,0,0.78); color: white;
       padding: 6px 10px; z-index: 100;
-      font-size: 11px; max-height: 32vh; overflow-y: auto;
+      font-size: 11px; max-height: 26vh; overflow-y: auto;
     }
     #ui h3 { margin: 0 0 3px 0; font-size: 12px; }
     #status { font-family: monospace; font-size: 10px; line-height: 1.4; }
@@ -76,13 +76,76 @@
     #legend { position: fixed; bottom: 8px; left: 8px; right: 8px; background: rgba(0,0,0,0.78); color: white; padding: 5px 8px; border-radius: 8px; font-size: 9px; z-index: 100; display: none; flex-wrap: wrap; gap: 6px; justify-content: center; }
     .swatch { display: inline-block; width: 9px; height: 9px; margin-right: 3px; vertical-align: middle; border-radius: 2px; }
 
-    #log { position: fixed; top: 34%; left: 8px; right: 8px; background: rgba(0,0,0,0.88); color: #4ade80; padding: 8px; border-radius: 8px; font-family: monospace; font-size: 9px; z-index: 150; max-height: 45vh; overflow-y: auto; display: none; white-space: pre-wrap; }
+    #log { position: fixed; top: 28%; left: 8px; right: 8px; background: rgba(0,0,0,0.88); color: #4ade80; padding: 8px; border-radius: 8px; font-family: monospace; font-size: 9px; z-index: 150; max-height: 40vh; overflow-y: auto; display: none; white-space: pre-wrap; }
 
-    #floating-ctrl { position: fixed; right: 8px; top: 34%; display: none; flex-direction: column; gap: 5px; z-index: 110; }
-    #floating-ctrl button { width: 40px; height: 40px; border-radius: 50%; border: none; color: white; font-size: 14px; box-shadow: 0 2px 6px rgba(0,0,0,0.5); }
-    #floating-ctrl button.cal { background: rgba(245, 158, 11, 0.9); }
-    #floating-ctrl button.gnd { background: rgba(168, 85, 247, 0.9); font-size: 11px; }
-    #floating-ctrl button.tog { background: rgba(139, 92, 246, 0.9); font-size: 11px; }
+    /* ===== Floating control panel ===== */
+    #control-panel {
+      position: fixed;
+      right: 6px;
+      top: 28%;
+      z-index: 110;
+      background: rgba(20, 20, 30, 0.85);
+      border-radius: 12px;
+      padding: 8px 6px;
+      display: none;
+      flex-direction: column;
+      gap: 6px;
+      width: 80px;
+      max-height: 65vh;
+      overflow-y: auto;
+    }
+    #control-panel .ctrl-section {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      padding-bottom: 5px;
+      border-bottom: 1px solid rgba(255,255,255,0.15);
+    }
+    #control-panel .ctrl-section:last-child { border-bottom: none; }
+    #control-panel .ctrl-label {
+      font-size: 8px;
+      color: rgba(255,255,255,0.6);
+      text-align: center;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    #control-panel .btn-row {
+      display: flex;
+      gap: 3px;
+      justify-content: center;
+    }
+    #control-panel button {
+      flex: 1;
+      min-width: 30px;
+      height: 32px;
+      border-radius: 6px;
+      border: none;
+      color: white;
+      font-size: 11px;
+      font-weight: 600;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.5);
+      padding: 0;
+      cursor: pointer;
+    }
+    #control-panel button.cal { background: rgba(245, 158, 11, 0.85); }
+    #control-panel button.toggle { background: rgba(139, 92, 246, 0.85); font-size: 10px; }
+    #control-panel button.toggle.off { background: rgba(75, 85, 99, 0.85); opacity: 0.5; }
+    #control-panel button.action { background: rgba(16, 185, 129, 0.85); font-size: 9px; }
+    #control-panel .slider-wrap {
+      padding: 3px 4px;
+    }
+    #control-panel input[type=range] {
+      width: 100%;
+      margin: 0;
+      accent-color: #4ade80;
+    }
+    #control-panel .slider-val {
+      text-align: center;
+      font-family: monospace;
+      font-size: 10px;
+      color: #4ade80;
+      margin-top: 2px;
+    }
 
     #aim-info {
       position: fixed; top: 50%; left: 50%;
@@ -111,20 +174,20 @@
 <div id="aim-info"></div>
 
 <div id="file-input">
-  <h3>AR OLS Viewer v8</h3>
-  <p style="font-size:9px;opacity:0.7;margin:2px 0">True MSL coordinate system</p>
+  <h3>AR OLS Viewer v9</h3>
+  <p style="font-size:9px;opacity:0.7;margin:2px 0">Slider controls + smart DTM sampling</p>
 
   <div class="section-header">1. OLS Surface</div>
   <label for="geojson-file" class="file-label" id="ols-label">📂 OLS GeoJSON</label>
   <input type="file" id="geojson-file" accept=".geojson,.json">
   <div id="ols-status" class="file-status">ยังไม่ได้เลือก</div>
 
-  <div class="section-header">2. DTM (จำเป็น!)</div>
+  <div class="section-header">2. DTM</div>
   <label for="dtm-header-file" class="file-label" id="dtm-header-label">📂 DTM .json</label>
   <input type="file" id="dtm-header-file" accept=".json">
   <label for="dtm-bin-file" class="file-label" id="dtm-bin-label">📂 DTM .dtm</label>
   <input type="file" id="dtm-bin-file" accept=".dtm,application/octet-stream">
-  <div id="dtm-status" class="file-status">จำเป็นเพื่อความแม่นยำ</div>
+  <div id="dtm-status" class="file-status">จำเป็น</div>
 
   <div class="section-header">3. Height blocks</div>
   <label for="hblock-file" class="file-label" id="hblock-label">📂 height block GeoJSON</label>
@@ -133,7 +196,7 @@
 
   <div class="section-header">4. ตัวเลือก</div>
   <div class="opts">
-    <span>Manual ground MSL (fallback):</span>
+    <span>Manual ground (fallback):</span>
     <span><input type="number" id="manual-ground" value="30" step="1"> m</span>
   </div>
   <div class="opts">
@@ -149,18 +212,6 @@
     <span><input type="number" id="terrain-radius" value="1000" min="200" max="3000" step="200"> m</span>
   </div>
   <div class="opts">
-    <label class="checkbox"><input type="checkbox" id="show-terrain" checked><span>Terrain mesh</span></label>
-  </div>
-  <div class="opts">
-    <label class="checkbox"><input type="checkbox" id="show-blocks" checked><span>Height blocks</span></label>
-  </div>
-  <div class="opts">
-    <label class="checkbox"><input type="checkbox" id="show-labels" checked><span>Labels</span></label>
-  </div>
-  <div class="opts">
-    <label class="checkbox"><input type="checkbox" id="debug-markers"><span>Debug markers</span></label>
-  </div>
-  <div class="opts">
     <label class="checkbox"><input type="checkbox" id="test-mode"><span>โหมดทดสอบ</span></label>
   </div>
 
@@ -168,7 +219,7 @@
 </div>
 
 <div id="ui" style="display:none">
-  <h3>AR OLS v8</h3>
+  <h3>AR OLS v9</h3>
   <div id="status">เริ่มต้น...</div>
 </div>
 
@@ -178,8 +229,8 @@
   <div><span class="swatch" style="background:#22c55e"></span>Approach</div>
   <div><span class="swatch" style="background:#f59e0b"></span>Take-off</div>
   <div><span class="swatch" style="background:#ec4899"></span>Trans</div>
-  <div><span class="swatch" style="background:#10b981"></span>Block สูง</div>
-  <div><span class="swatch" style="background:#ef4444"></span>Block ต่ำ/ลบ</div>
+  <div><span class="swatch" style="background:#10b981"></span>BLK สูง</div>
+  <div><span class="swatch" style="background:#ef4444"></span>BLK ต่ำ</div>
   <div><span class="swatch" style="background:#94a3b8"></span>Terrain</div>
 </div>
 
@@ -187,17 +238,41 @@
   <canvas id="minimap" width="180" height="180"></canvas>
 </div>
 
-<div id="floating-ctrl">
-  <button class="cal" onclick="adjustHeading(-5)">⟲5</button>
-  <button class="cal" onclick="adjustHeading(-1)">⟲1</button>
-  <button class="cal" onclick="adjustHeading(1)">⟳1</button>
-  <button class="cal" onclick="adjustHeading(5)">⟳5</button>
-  <button class="gnd" onclick="adjustGround(-1)">G−</button>
-  <button class="gnd" onclick="adjustGround(1)">G+</button>
-  <button class="tog" onclick="toggleLayer('terrain')">TER</button>
-  <button class="tog" onclick="toggleLayer('blocks')">BLK</button>
-  <button class="tog" onclick="toggleLayer('labels')">LBL</button>
-  <button class="cal" onclick="toggleLog()">🔍</button>
+<!-- New panel-style controls -->
+<div id="control-panel">
+
+  <div class="ctrl-section">
+    <div class="ctrl-label">Ground Y (m)</div>
+    <div class="slider-wrap">
+      <input type="range" id="ground-slider" min="-50" max="50" value="0" step="0.5">
+      <div class="slider-val" id="ground-val">0.0</div>
+    </div>
+    <button class="action" onclick="snapTerrainToFeet()">SNAP</button>
+  </div>
+
+  <div class="ctrl-section">
+    <div class="ctrl-label">Heading (°)</div>
+    <div class="slider-wrap">
+      <input type="range" id="heading-slider" min="-180" max="180" value="0" step="1">
+      <div class="slider-val" id="heading-val">0</div>
+    </div>
+    <div class="btn-row">
+      <button class="cal" onclick="adjustHeadingSlider(-1)">−</button>
+      <button class="cal" onclick="adjustHeadingSlider(1)">+</button>
+    </div>
+  </div>
+
+  <div class="ctrl-section">
+    <div class="ctrl-label">Layers</div>
+    <button class="toggle" id="btn-ols" onclick="toggleLayer('ols')">OLS</button>
+    <button class="toggle" id="btn-blk" onclick="toggleLayer('blocks')">BLK</button>
+    <button class="toggle" id="btn-lbl" onclick="toggleLayer('labels')">LBL</button>
+    <button class="toggle" id="btn-ter" onclick="toggleLayer('terrain')">TER</button>
+  </div>
+
+  <div class="ctrl-section">
+    <button class="cal" onclick="toggleLog()">LOG</button>
+  </div>
 </div>
 
 <div id="log"></div>
