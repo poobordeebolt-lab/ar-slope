@@ -1,32 +1,43 @@
 // =============================================
-// AR OLS Surface Viewer v7
-// + Height block grid (gradient color + labels)
-// + Terrain mesh from DTM (1km radius)
-// + HUD shows: surface + block max_height + terrain
+// AR OLS Surface Viewer v8
+// Clean MSL coordinate system:
+//   - Camera eye at MSL = DTM(user_lat, user_lon) + 1.6
+//   - All world Y values are (object_MSL - eye_MSL)
+//   - OLS surfaces use their actual MSL from GeoJSON
+//   - Height blocks render at OLS surface MSL =
+//     terrain_MSL_at_block + max_height_allowance
+//   - Terrain mesh uses actual DTM MSL values
+//   - NO surfaceOffsetY hack — only G± to refine ground guess
 // =============================================
 
+// ----- State -----
 let userPos = null;
 let userHeading = 0;
 let surfaceData = null;
 let dtmHeader = null;
 let dtmData = null;
 let heightBlockData = null;
+
 let renderRadius = 8000;
 let blockRadius = 2000;
 let terrainRadius = 1000;
 let testMode = false;
-let showDebugMarkers = true;
+let showDebugMarkers = false;
 let showTerrain = true;
 let showBlocks = true;
 let showLabels = true;
-let surfaceOffsetY = 0;
+
 let headingOffset = 0;
 let manualGroundMSL = 30;
-let userGroundMSL = null;
+let userGroundMSL = null;     // sampled from DTM (or manual)
+let userEyeMSL = null;        // = userGroundMSL + 1.6
+let groundOffset = 0;          // small adjustment for G± buttons
 let anchorPos = null;
+
 let allFeaturesEnu = [];
 let allBlocksEnu = [];
 
+// Three.js
 let renderer, scene, camera, worldGroup;
 let surfaceMeshes = [];
 let blockMeshes = [];
@@ -52,20 +63,14 @@ function getSurfaceColor(name) {
   return SURFACE_COLORS.default;
 }
 
-// Gradient: red (low/negative) → yellow → green (high)
-// Range: -80 to +145 in the file
+// Block color: red (negative/very low) → green (high)
+// Negative = obstruction exists already, max_height < 0 means surface is below terrain
 function getHeightBlockColor(maxHeight) {
-  // Normalize to 0..1 with -50 = red, 0 = orange, 50 = yellow, 100+ = green
+  // Map -50..150 to 0..1
   const t = Math.max(0, Math.min(1, (maxHeight + 50) / 200));
-  // Linear gradient: red(0) → yellow(0.5) → green(1)
   let r, g, b;
-  if (t < 0.5) {
-    // red → yellow
-    r = 1; g = t * 2; b = 0;
-  } else {
-    // yellow → green
-    r = 1 - (t - 0.5) * 2; g = 1; b = 0;
-  }
+  if (t < 0.5) { r = 1; g = t * 2; b = 0; }
+  else { r = 1 - (t - 0.5) * 2; g = 1; b = 0; }
   return new THREE.Color(r, g, b);
 }
 
@@ -100,7 +105,6 @@ function checkReadyToStart() {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-  // OLS
   document.getElementById('geojson-file').addEventListener('change', (e) => {
     const file = e.target.files[0]; if (!file) return;
     const r = new FileReader();
@@ -108,8 +112,7 @@ document.addEventListener('DOMContentLoaded', () => {
       try {
         surfaceData = JSON.parse(evt.target.result);
         if (!surfaceData.features) throw new Error('not FeatureCollection');
-        document.getElementById('ols-status').innerHTML =
-          `<span style="color:#4ade80">✓ ${file.name} (${surfaceData.features.length} features)</span>`;
+        document.getElementById('ols-status').innerHTML = `<span style="color:#4ade80">✓ ${surfaceData.features.length} features</span>`;
         document.getElementById('ols-label').classList.add('has-file');
         document.getElementById('ols-label').textContent = `✓ ${file.name}`;
         checkReadyToStart();
@@ -120,26 +123,22 @@ document.addEventListener('DOMContentLoaded', () => {
     r.readAsText(file);
   });
 
-  // DTM header
   document.getElementById('dtm-header-file').addEventListener('change', (e) => {
     const file = e.target.files[0]; if (!file) return;
     const r = new FileReader();
     r.onload = (evt) => {
       try {
         dtmHeader = JSON.parse(evt.target.result);
-        if (!dtmHeader.bbox || !dtmHeader.width) throw new Error('invalid header');
+        if (!dtmHeader.bbox || !dtmHeader.width) throw new Error('invalid');
         dtmHeaderLoaded = true;
         document.getElementById('dtm-header-label').classList.add('has-file');
         document.getElementById('dtm-header-label').textContent = `✓ ${file.name}`;
         updateDtmStatus();
-      } catch (err) {
-        document.getElementById('dtm-status').innerHTML = `<span style="color:#f87171">✗ ${err.message}</span>`;
-      }
+      } catch (err) { document.getElementById('dtm-status').innerHTML = `<span style="color:#f87171">✗ ${err.message}</span>`; }
     };
     r.readAsText(file);
   });
 
-  // DTM binary
   document.getElementById('dtm-bin-file').addEventListener('change', (e) => {
     const file = e.target.files[0]; if (!file) return;
     const r = new FileReader();
@@ -148,16 +147,13 @@ document.addEventListener('DOMContentLoaded', () => {
         dtmData = new Int16Array(evt.target.result);
         dtmBinLoaded = true;
         document.getElementById('dtm-bin-label').classList.add('has-file');
-        document.getElementById('dtm-bin-label').textContent = `✓ ${file.name} (${(evt.target.result.byteLength/1e6).toFixed(1)}MB)`;
+        document.getElementById('dtm-bin-label').textContent = `✓ ${(evt.target.result.byteLength/1e6).toFixed(1)}MB`;
         updateDtmStatus();
-      } catch (err) {
-        document.getElementById('dtm-status').innerHTML = `<span style="color:#f87171">✗ ${err.message}</span>`;
-      }
+      } catch (err) { document.getElementById('dtm-status').innerHTML = `<span style="color:#f87171">✗ ${err.message}</span>`; }
     };
     r.readAsArrayBuffer(file);
   });
 
-  // Height blocks
   document.getElementById('hblock-file').addEventListener('change', (e) => {
     const file = e.target.files[0]; if (!file) return;
     const r = new FileReader();
@@ -165,18 +161,10 @@ document.addEventListener('DOMContentLoaded', () => {
       try {
         heightBlockData = JSON.parse(evt.target.result);
         if (!heightBlockData.features) throw new Error('not FeatureCollection');
-        // Verify max_height_allowance exists
-        const sample = heightBlockData.features[0];
-        if (!sample.properties || sample.properties.max_height_allowance === undefined) {
-          throw new Error('missing max_height_allowance property');
-        }
-        document.getElementById('hblock-status').innerHTML =
-          `<span style="color:#4ade80">✓ ${file.name} (${heightBlockData.features.length} blocks)</span>`;
+        document.getElementById('hblock-status').innerHTML = `<span style="color:#4ade80">✓ ${heightBlockData.features.length} blocks</span>`;
         document.getElementById('hblock-label').classList.add('has-file');
         document.getElementById('hblock-label').textContent = `✓ ${file.name}`;
-      } catch (err) {
-        document.getElementById('hblock-status').innerHTML = `<span style="color:#f87171">✗ ${err.message}</span>`;
-      }
+      } catch (err) { document.getElementById('hblock-status').innerHTML = `<span style="color:#f87171">✗ ${err.message}</span>`; }
     };
     r.readAsText(file);
   });
@@ -196,7 +184,7 @@ function updateDtmStatus() {
 }
 
 // ============================================================
-// DTM sampling
+// DTM bilinear sample
 // ============================================================
 function sampleDTM(lat, lon) {
   if (!dtmHeader || !dtmData) return null;
@@ -235,8 +223,8 @@ async function startAR() {
   showLabels = document.getElementById('show-labels').checked;
   manualGroundMSL = parseFloat(document.getElementById('manual-ground').value) || 30;
 
-  showLog('=== AR v7 ===');
-  showLog(`DTM: ${dtmData ? '✓' : '✗'}, Blocks: ${heightBlockData ? '✓' : '✗'}`);
+  showLog('=== AR v8 (true MSL) ===');
+  showLog(`DTM: ${dtmData ? '✓' : '✗ MANUAL FALLBACK'}`);
 
   document.getElementById('file-input').style.display = 'none';
   document.getElementById('ui').style.display = 'block';
@@ -280,15 +268,12 @@ function initThree() {
   renderer.setPixelRatio(window.devicePixelRatio);
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.setClearColor(0x000000, 0);
-
   scene = new THREE.Scene();
   camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 100000);
   camera.position.set(0, 0, 0);
-
   worldGroup = new THREE.Group();
   scene.add(worldGroup);
   scene.add(new THREE.AmbientLight(0xffffff, 1.0));
-
   window.addEventListener('resize', () => {
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
@@ -350,10 +335,7 @@ function waitForGPSThenRender() {
       showLog(`GPS: ${userPos.lat.toFixed(5)}, ${userPos.lon.toFixed(5)} ±${userPos.acc.toFixed(0)}m`);
       decideAnchorAndRender();
       window._rendered = true;
-      setTimeout(() => {
-        const logEl = document.getElementById('log');
-        if (logEl) logEl.style.display = 'none';
-      }, 12000);
+      setTimeout(() => { const l = document.getElementById('log'); if (l) l.style.display = 'none'; }, 12000);
     }
   }, (err) => showLog('GPS error: ' + err.message, true),
   { enableHighAccuracy: true, maximumAge: 0, timeout: 30000 });
@@ -371,22 +353,45 @@ function decideAnchorAndRender() {
   }
   anchorPos = { lat: userPos.lat, lon: userPos.lon };
 
+  // CRITICAL: get accurate ground MSL at user position
   const dtmGround = sampleDTM(anchorPos.lat, anchorPos.lon);
   if (dtmGround !== null) {
     userGroundMSL = dtmGround;
-    showLog(`✓ DTM ground: ${userGroundMSL.toFixed(1)}m`);
+    showLog(`✓ DTM ground at user: ${userGroundMSL.toFixed(2)} m MSL`);
   } else {
     userGroundMSL = manualGroundMSL;
-    showLog(`Manual ground: ${userGroundMSL}m`);
+    showLog(`⚠ DTM not covering user → manual: ${userGroundMSL} m`, true);
   }
-  showLog(`Eye MSL: ${(userGroundMSL+1.6).toFixed(1)}m`);
+  userEyeMSL = userGroundMSL + 1.6;
+  showLog(`Eye MSL: ${userEyeMSL.toFixed(2)} m`);
 
   precomputeFeatures();
   if (heightBlockData) precomputeBlocks();
+  renderAll();
+}
+
+function renderAll() {
   renderSurfaces();
   if (showBlocks && heightBlockData) renderHeightBlocks();
   if (showTerrain && dtmData) renderTerrain();
   if (showDebugMarkers) renderDebugMarkers();
+  printSurfaceSummary();
+}
+
+function printSurfaceSummary() {
+  showLog('\n=== Distance/angle summary ===');
+  showLog(`Eye MSL: ${userEyeMSL.toFixed(1)} m`);
+  allFeaturesEnu.forEach(p => {
+    if (p.minDist > renderRadius) return;
+    let minA = Infinity, maxA = -Infinity;
+    p.rings.forEach(ring => ring.forEach(([lon, lat, alt]) => {
+      if (alt < minA) minA = alt;
+      if (alt > maxA) maxA = alt;
+    }));
+    const heightAboveEye = minA - userEyeMSL;
+    const angle = Math.atan(heightAboveEye / Math.max(p.minDist, 1)) * 180 / Math.PI;
+    showLog(`${p.name.substring(0, 25)}: MSL ${minA.toFixed(0)}-${maxA.toFixed(0)}, ${p.minDist.toFixed(0)}m, ${angle.toFixed(1)}°`);
+  });
 }
 
 function computeFeaturesCentroid(geojson) {
@@ -400,16 +405,28 @@ function shiftAllCoords(geojson, dLat, dLon) {
   geojson.features.forEach(f => w(f.geometry.coordinates));
 }
 
-// World position relative to camera (camera at 0,0,0; eye at MSL = ground+1.6)
-function llToCamRel(lat, lon, alt) {
+// ============================================================
+// COORDINATE SYSTEM (the heart of v8)
+// ============================================================
+// Camera is at (0,0,0). Camera eye represents user's eye at MSL = userEyeMSL.
+// Any object at world MSL altitude `obj_msl` is rendered at:
+//   Y = obj_msl - userEyeMSL - groundOffset
+// (groundOffset is the small ± adjustment via G± buttons)
+//
+// Lat/Lon are converted to local ENU meters via simple equirectangular projection
+// (good for distances up to ~50 km).
+function llToCamRel(lat, lon, mslAlt) {
   const R = 6378137;
   const dLat = (lat - anchorPos.lat) * Math.PI / 180;
   const dLon = (lon - anchorPos.lon) * Math.PI / 180;
   const refLat = anchorPos.lat * Math.PI / 180;
   const east = dLon * R * Math.cos(refLat);
   const north = dLat * R;
-  const eyeMSL = userGroundMSL + 1.6;
-  return { x: east, y: (alt || 0) - eyeMSL + surfaceOffsetY, z: -north };
+  return {
+    x: east,
+    y: mslAlt - userEyeMSL - groundOffset,
+    z: -north
+  };
 }
 
 function horizDist(lat, lon) {
@@ -452,7 +469,7 @@ function renderSurfaces() {
   let n = 0;
   allFeaturesEnu.forEach(p => {
     if (p.minDist > renderRadius) return;
-    const mesh = createPolygonMesh(p.rings, p.color, p.name, 0.4);
+    const mesh = createPolygonMesh(p.rings, p.color, p.name, 0.35);
     if (mesh) { worldGroup.add(mesh); surfaceMeshes.push(mesh); n++; }
   });
   showLog(`Rendered OLS: ${n}`);
@@ -470,7 +487,7 @@ function createPolygonMesh(rings, color, name, opacity) {
       ring[0][1] === ring[ring.length-1][1]) ? ring.length - 1 : ring.length;
     for (let i = 0; i < lastIdx; i++) {
       const [lon, lat, alt] = ring[i];
-      const c = llToCamRel(lat, lon, alt);
+      const c = llToCamRel(lat, lon, alt || 0);
       flat2D.push(c.x, c.z);
       pos3D.push(c.x, c.y, c.z);
       vIdx++;
@@ -487,14 +504,15 @@ function createPolygonMesh(rings, color, name, opacity) {
     side: THREE.DoubleSide, depthWrite: false
   });
   const mesh = new THREE.Mesh(geom, mat);
-  mesh.name = name;
   mesh.userData = { name, kind: 'surface' };
+  // Wireframe
   mesh.add(new THREE.Mesh(geom, new THREE.MeshBasicMaterial({
-    color: color, wireframe: true, transparent: true, opacity: 0.75
+    color: color, wireframe: true, transparent: true, opacity: 0.7
   })));
+  // Outline
   const outPts = [];
   outer.forEach(([lon, lat, alt]) => {
-    const c = llToCamRel(lat, lon, alt);
+    const c = llToCamRel(lat, lon, alt || 0);
     outPts.push(new THREE.Vector3(c.x, c.y, c.z));
   });
   mesh.add(new THREE.Line(
@@ -506,16 +524,17 @@ function createPolygonMesh(rings, color, name, opacity) {
 
 // ============================================================
 // Height blocks
+// Render at MSL = terrain_at_block_centroid + max_height_allowance
+// (i.e. AT the OLS surface level, not at ground)
 // ============================================================
 function precomputeBlocks() {
   allBlocksEnu = [];
-  heightBlockData.features.forEach((feat, idx) => {
+  heightBlockData.features.forEach((feat) => {
     if (feat.geometry.type !== 'Polygon') return;
     const ring = feat.geometry.coordinates[0];
     if (!ring || ring.length < 3) return;
 
-    // Compute centroid + min dist
-    let sumLat = 0, sumLon = 0, n = 0;
+    let sumLat=0, sumLon=0, n=0;
     let minDist = Infinity;
     ring.forEach(([lon, lat]) => {
       sumLon += lon; sumLat += lat; n++;
@@ -527,9 +546,14 @@ function precomputeBlocks() {
     const maxH = parseFloat(feat.properties.max_height_allowance);
     if (isNaN(maxH)) return;
 
+    // Sample DTM at centroid → terrain MSL → surface MSL
+    let terrainMSL = sampleDTM(cLat, cLon);
+    if (terrainMSL === null) terrainMSL = userGroundMSL;
+    const surfaceMSL = terrainMSL + maxH;
+
     allBlocksEnu.push({
       ring, minDist, centroidLat: cLat, centroidLon: cLon,
-      maxHeight: maxH,
+      maxHeight: maxH, terrainMSL, surfaceMSL,
       name: feat.properties.Name || 'Block',
       designator: feat.properties.designator || ''
     });
@@ -557,24 +581,26 @@ function renderHeightBlocks() {
       }
     }
   });
-  showLog(`Rendered blocks: ${n} (labels: ${labelSprites.length})`);
+  showLog(`Rendered blocks: ${n}, labels: ${labelSprites.length}`);
 }
 
 function createBlockMesh(block) {
   const ring = block.ring;
-  // Sample ground at centroid for Z
-  let groundMSL = sampleDTM(block.centroidLat, block.centroidLon);
-  if (groundMSL === null) groundMSL = userGroundMSL;
-  // Place block slightly above ground (1m) so it doesn't z-fight with terrain
-  const blockMSL = groundMSL + 1;
-
+  // Render at OLS surface MSL (not ground!)
+  // Each ring vertex: sample DTM there, add max_height to get surface MSL
+  // Simpler: use centroid surface MSL for whole block (it's small ~400m)
+  // Or sample per-vertex for more accuracy
   const flat2D = [], pos3D = [];
   const lastIdx = (ring.length > 1 &&
     ring[0][0] === ring[ring.length-1][0] &&
     ring[0][1] === ring[ring.length-1][1]) ? ring.length - 1 : ring.length;
   for (let i = 0; i < lastIdx; i++) {
     const [lon, lat] = ring[i];
-    const c = llToCamRel(lat, lon, blockMSL);
+    // Per-vertex DTM sample for more accurate surface following
+    let vTerrain = sampleDTM(lat, lon);
+    if (vTerrain === null) vTerrain = block.terrainMSL;
+    const vSurfaceMSL = vTerrain + block.maxHeight;
+    const c = llToCamRel(lat, lon, vSurfaceMSL);
     flat2D.push(c.x, c.z);
     pos3D.push(c.x, c.y, c.z);
   }
@@ -588,7 +614,7 @@ function createBlockMesh(block) {
   geom.computeVertexNormals();
 
   const mat = new THREE.MeshBasicMaterial({
-    color: color, transparent: true, opacity: 0.55,
+    color: color, transparent: true, opacity: 0.5,
     side: THREE.DoubleSide, depthWrite: false
   });
   const mesh = new THREE.Mesh(geom, mat);
@@ -596,14 +622,17 @@ function createBlockMesh(block) {
     kind: 'block',
     name: `${block.name} ${block.designator}`,
     maxHeight: block.maxHeight,
-    groundMSL: groundMSL
+    terrainMSL: block.terrainMSL,
+    surfaceMSL: block.surfaceMSL
   };
 
   // Outline
   const outPts = [];
   for (let i = 0; i < lastIdx; i++) {
     const [lon, lat] = ring[i];
-    const c = llToCamRel(lat, lon, blockMSL);
+    let vTerrain = sampleDTM(lat, lon);
+    if (vTerrain === null) vTerrain = block.terrainMSL;
+    const c = llToCamRel(lat, lon, vTerrain + block.maxHeight);
     outPts.push(new THREE.Vector3(c.x, c.y, c.z));
   }
   outPts.push(outPts[0]);
@@ -611,17 +640,13 @@ function createBlockMesh(block) {
     new THREE.BufferGeometry().setFromPoints(outPts),
     new THREE.LineBasicMaterial({ color: color })
   ));
-
   return mesh;
 }
 
-// Create text label as sprite using canvas
 function createLabelSprite(block) {
-  let groundMSL = sampleDTM(block.centroidLat, block.centroidLon);
-  if (groundMSL === null) groundMSL = userGroundMSL;
-  const c = llToCamRel(block.centroidLat, block.centroidLon, groundMSL + 2);
+  // Place label at centroid + at surface MSL
+  const c = llToCamRel(block.centroidLat, block.centroidLon, block.surfaceMSL);
 
-  // Create canvas texture
   const canvas = document.createElement('canvas');
   canvas.width = 128; canvas.height = 64;
   const ctx = canvas.getContext('2d');
@@ -640,7 +665,6 @@ function createLabelSprite(block) {
   });
   const sprite = new THREE.Sprite(mat);
   sprite.position.set(c.x, c.y, c.z);
-  // Scale based on distance — labels should be ~5m wide regardless of distance
   const dist = Math.sqrt(c.x*c.x + c.y*c.y + c.z*c.z);
   const scale = Math.max(5, dist * 0.04);
   sprite.scale.set(scale, scale * 0.5, 1);
@@ -649,18 +673,17 @@ function createLabelSprite(block) {
 }
 
 // ============================================================
-// Terrain mesh from DTM
+// Terrain mesh — uses real DTM MSL values
 // ============================================================
 function renderTerrain() {
-  if (!dtmData) { showLog('No DTM for terrain'); return; }
+  if (!dtmData) return;
   if (terrainMesh) {
     worldGroup.remove(terrainMesh);
     terrainMesh.geometry.dispose();
     terrainMesh = null;
   }
 
-  const { bbox, width, height, resolution_deg } = dtmHeader;
-  // Convert terrainRadius (meters) to degrees roughly
+  const { bbox, width, height } = dtmHeader;
   const mPerDegLat = 111320;
   const mPerDegLon = 111320 * Math.cos(anchorPos.lat * Math.PI / 180);
   const dLat = terrainRadius / mPerDegLat;
@@ -671,10 +694,6 @@ function renderTerrain() {
   const minLon = Math.max(bbox.west, anchorPos.lon - dLon);
   const maxLon = Math.min(bbox.east, anchorPos.lon + dLon);
 
-  const resLat = resolution_deg.lat;
-  const resLon = resolution_deg.lon;
-
-  // Compute pixel range in DTM
   const px0 = Math.max(0, Math.floor((minLon - bbox.west) / (bbox.east - bbox.west) * (width - 1)));
   const px1 = Math.min(width - 1, Math.ceil((maxLon - bbox.west) / (bbox.east - bbox.west) * (width - 1)));
   const py0 = Math.max(0, Math.floor((bbox.north - maxLat) / (bbox.north - bbox.south) * (height - 1)));
@@ -682,11 +701,11 @@ function renderTerrain() {
 
   const cols = px1 - px0 + 1;
   const rows = py1 - py0 + 1;
-  showLog(`Terrain: ${cols}x${rows} cells`);
+  showLog(`Terrain: ${cols}x${rows}`);
 
-  if (cols < 2 || rows < 2) { showLog('Terrain area too small'); return; }
+  if (cols < 2 || rows < 2) return;
   if (cols * rows > 50000) {
-    showLog(`Terrain too large (${cols*rows}), reduce radius`, true);
+    showLog(`Terrain too large (${cols*rows}), skip`, true);
     return;
   }
 
@@ -698,7 +717,6 @@ function renderTerrain() {
     for (let col = 0; col < cols; col++) {
       const x = px0 + col;
       const y = py0 + row;
-      // DTM lat/lon for this cell
       const lon = bbox.west + (x / (width - 1)) * (bbox.east - bbox.west);
       const lat = bbox.north - (y / (height - 1)) * (bbox.north - bbox.south);
       let alt = dtmData[y * width + x];
@@ -706,7 +724,7 @@ function renderTerrain() {
       const c = llToCamRel(lat, lon, alt);
       positions.push(c.x, c.y, c.z);
 
-      // Color terrain by elevation: blue (low) → green → brown (high)
+      // Color by elevation
       const eleNorm = Math.max(0, Math.min(1, (alt - 0) / 200));
       const tcol = new THREE.Color();
       tcol.setHSL(0.3 - eleNorm * 0.2, 0.5, 0.4 + eleNorm * 0.2);
@@ -714,7 +732,6 @@ function renderTerrain() {
     }
   }
 
-  // Build triangle indices
   for (let row = 0; row < rows - 1; row++) {
     for (let col = 0; col < cols - 1; col++) {
       const a = row * cols + col;
@@ -733,37 +750,29 @@ function renderTerrain() {
   geom.computeVertexNormals();
 
   const mat = new THREE.MeshBasicMaterial({
-    vertexColors: true, transparent: true, opacity: 0.5,
-    side: THREE.DoubleSide, wireframe: false
+    vertexColors: true, transparent: true, opacity: 0.55,
+    side: THREE.DoubleSide
   });
   terrainMesh = new THREE.Mesh(geom, mat);
   terrainMesh.userData = { kind: 'terrain' };
   worldGroup.add(terrainMesh);
 
-  // Wireframe overlay
+  // Wireframe
   const wireMat = new THREE.MeshBasicMaterial({
-    color: 0xffffff, wireframe: true, transparent: true, opacity: 0.15
+    color: 0xffffff, wireframe: true, transparent: true, opacity: 0.18
   });
   terrainMesh.add(new THREE.Mesh(geom, wireMat));
-
   showLog(`✓ Terrain rendered`);
 }
 
-// ============================================================
-// Debug markers
-// ============================================================
 function renderDebugMarkers() {
   const dist = 30;
-  const ms = [
-    { x: 0, z: -dist, color: 0xff0000 },
-    { x: dist, z: 0, color: 0x00ff00 },
-    { x: 0, z: dist, color: 0xffff00 },
-    { x: -dist, z: 0, color: 0x00ffff },
-  ];
-  ms.forEach(m => {
+  [{ x: 0, z: -dist, c: 0xff0000 }, { x: dist, z: 0, c: 0x00ff00 },
+   { x: 0, z: dist, c: 0xffff00 }, { x: -dist, z: 0, c: 0x00ffff }
+  ].forEach(m => {
     const pillar = new THREE.Mesh(
       new THREE.CylinderGeometry(2, 2, 20, 8),
-      new THREE.MeshBasicMaterial({ color: m.color })
+      new THREE.MeshBasicMaterial({ color: m.c })
     );
     pillar.position.set(m.x, 0, m.z);
     worldGroup.add(pillar);
@@ -773,22 +782,14 @@ function renderDebugMarkers() {
 // ============================================================
 // Controls
 // ============================================================
-function adjustHeight(d) {
-  surfaceOffsetY += d;
-  showLog(`Surf Y: ${surfaceOffsetY}`);
-  // Apply only to OLS (not blocks/terrain which are tied to ground)
-  surfaceMeshes.forEach(mesh => {
-    const arr = mesh.geometry.attributes.position.array;
-    for (let i = 1; i < arr.length; i += 3) arr[i] += d;
-    mesh.geometry.attributes.position.needsUpdate = true;
-    mesh.children.forEach(child => {
-      if (child.type === 'Line') {
-        const ca = child.geometry.attributes.position.array;
-        for (let i = 1; i < ca.length; i += 3) ca[i] += d;
-        child.geometry.attributes.position.needsUpdate = true;
-      }
-    });
-  });
+function adjustGround(delta) {
+  // Refine the ground guess by ±1 m
+  // This shifts EVERYTHING vertically (terrain, blocks, surfaces all move together)
+  // Use this if eye level is wrong (e.g. you're on a 2nd floor)
+  groundOffset += delta;
+  showLog(`Ground offset: ${groundOffset >= 0 ? '+' : ''}${groundOffset} m`);
+  // Re-render everything (cheaper than patching geometries)
+  renderAll();
 }
 
 function adjustHeading(d) {
@@ -824,15 +825,16 @@ function startStatusLoop() {
       <div class="row"><span class="label">Pos</span><span>${userPos.lat.toFixed(5)}, ${userPos.lon.toFixed(5)}</span></div>
       <div class="row"><span class="label">Acc</span><span class="${accClass}">±${userPos.acc.toFixed(0)}m</span></div>
       <div class="row"><span class="label">Hdg</span><span>${userHeading.toFixed(0)}° (off ${headingOffset}°)</span></div>
-      <div class="row"><span class="label">Ground</span><span>${userGroundMSL ? userGroundMSL.toFixed(1) + 'm' : '-'}</span></div>
-      <div class="row"><span class="label">OLS</span><span>${surfaceMeshes.length} | Blk: ${blockMeshes.length} | Ter: ${terrainMesh ? 'y' : 'n'}</span></div>
+      <div class="row"><span class="label">Ground MSL</span><span>${userGroundMSL ? userGroundMSL.toFixed(1) + 'm' : '-'} ${groundOffset !== 0 ? '(±'+groundOffset+')' : ''}</span></div>
+      <div class="row"><span class="label">Eye MSL</span><span>${userEyeMSL ? (userEyeMSL+groundOffset).toFixed(1) + 'm' : '-'}</span></div>
+      <div class="row"><span class="label">Layers</span><span>OLS:${surfaceMeshes.length} BLK:${blockMeshes.length} TER:${terrainMesh?'y':'n'}</span></div>
     `;
     setStatus(html);
   }, 500);
 }
 
 // ============================================================
-// Aim info — raycast to find what crosshair is pointing at
+// Aim info — raycast all 3 layers
 // ============================================================
 function startAimInfoLoop() {
   const aimEl = document.getElementById('aim-info');
@@ -842,7 +844,6 @@ function startAimInfoLoop() {
     raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
     raycaster.far = 50000;
 
-    // Collect targets by kind
     const surfaceTargets = [];
     const blockTargets = [];
     const terrainTargets = [];
@@ -856,17 +857,18 @@ function startAimInfoLoop() {
       terrainMesh.children.forEach(c => { if (c.type === 'Mesh') terrainTargets.push(c); });
     }
 
-    const eyeMSL = userGroundMSL + 1.6;
-    let txt = '';
+    const eyeMSL = userEyeMSL + groundOffset;
+    let lines = [];
 
     // Surface
     const sHits = raycaster.intersectObjects(surfaceTargets, false);
     if (sHits.length > 0) {
       const h = sHits[0];
-      const surfMSL = h.point.y + eyeMSL - surfaceOffsetY;
-      const obj = h.object.parent?.userData?.kind === 'surface' ? h.object.parent : h.object;
-      txt += `${obj.userData?.name || obj.name || 'Surface'}\n`;
-      txt += `${h.distance.toFixed(0)}m | MSL ${surfMSL.toFixed(0)}m\n`;
+      const surfMSL = h.point.y + eyeMSL;
+      const obj = h.object.userData?.kind === 'surface' ? h.object : h.object.parent;
+      const name = (obj?.userData?.name || 'Surface').substring(0, 20);
+      lines.push(`OLS: ${name}`);
+      lines.push(`  ${h.distance.toFixed(0)}m  ${surfMSL.toFixed(0)}m MSL`);
     }
 
     // Block
@@ -874,10 +876,11 @@ function startAimInfoLoop() {
     if (bHits.length > 0) {
       const h = bHits[0];
       const ud = h.object.userData;
-      txt += `─────────\n`;
-      txt += `BLK ${ud.name || ''}\n`;
-      txt += `Max H: ${ud.maxHeight}m\n`;
-      txt += `Ground: ${ud.groundMSL ? ud.groundMSL.toFixed(0) : '?'}m MSL\n`;
+      lines.push(`─────────`);
+      lines.push(`BLK: ${ud.name}`);
+      lines.push(`  Max H: ${ud.maxHeight}m`);
+      lines.push(`  Surf:  ${ud.surfaceMSL.toFixed(0)}m MSL`);
+      lines.push(`  Ter:   ${ud.terrainMSL.toFixed(0)}m MSL`);
     }
 
     // Terrain
@@ -885,11 +888,12 @@ function startAimInfoLoop() {
     if (tHits.length > 0) {
       const h = tHits[0];
       const terMSL = h.point.y + eyeMSL;
-      txt += `─────────\n`;
-      txt += `Terrain ${terMSL.toFixed(0)}m MSL`;
+      lines.push(`─────────`);
+      lines.push(`Terrain: ${terMSL.toFixed(0)}m MSL`);
+      lines.push(`  ${h.distance.toFixed(0)}m`);
     }
 
-    aimEl.textContent = txt || '— ไม่ได้เล็งอะไร —';
+    aimEl.textContent = lines.length > 0 ? lines.join('\n') : '— ไม่ได้เล็งอะไร —';
   }, 200);
 }
 
@@ -908,7 +912,6 @@ function startMinimapLoop() {
     const cx = W/2, cy = H/2;
     const margin = 10;
     const scale = (Math.min(W, H)/2 - margin) / renderRadius;
-
     ctx.strokeStyle = 'rgba(74, 222, 128, 0.3)';
     ctx.lineWidth = 1;
     for (let r = 1000; r <= renderRadius; r += 1000) {
@@ -923,10 +926,7 @@ function startMinimapLoop() {
     ctx.fillText('S', cx, H - 4);
     ctx.fillText('E', W - 8, cy + 4);
     ctx.fillText('W', 8, cy + 4);
-
     const headingRad = (userHeading - headingOffset) * Math.PI / 180;
-
-    // OLS surfaces
     allFeaturesEnu.forEach(p => {
       const colorHex = '#' + p.color.toString(16).padStart(6, '0');
       ctx.strokeStyle = colorHex;
@@ -946,8 +946,6 @@ function startMinimapLoop() {
       ctx.fill();
       ctx.stroke();
     });
-
-    // User
     ctx.fillStyle = '#ffffff';
     ctx.beginPath();
     ctx.arc(cx, cy, 4, 0, Math.PI * 2);

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>AR OLS Viewer v7</title>
+  <title>AR OLS Viewer v8 (true MSL)</title>
 
   <script src="https://cdn.jsdelivr.net/npm/three@0.150.0/build/three.min.js"></script>
   <script src="https://unpkg.com/earcut@2.2.4/dist/earcut.min.js"></script>
@@ -12,28 +12,16 @@
     * { box-sizing: border-box; }
     html, body { margin: 0; padding: 0; overflow: hidden; height: 100%; background: #000; font-family: -apple-system, sans-serif; }
 
-    #cam-video {
-      position: fixed; top: 0; left: 0;
-      width: 100%; height: 100%;
-      object-fit: cover; z-index: 1;
-    }
-    #three-canvas {
-      position: fixed; top: 0; left: 0;
-      width: 100%; height: 100%;
-      z-index: 2; pointer-events: none;
-    }
+    #cam-video { position: fixed; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; z-index: 1; }
+    #three-canvas { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 2; pointer-events: none; }
 
     #crosshair {
       position: fixed; top: 50%; left: 50%;
       transform: translate(-50%, -50%);
       width: 40px; height: 40px;
-      pointer-events: none; z-index: 90;
-      display: none;
+      pointer-events: none; z-index: 90; display: none;
     }
-    #crosshair::before, #crosshair::after {
-      content: ''; position: absolute;
-      background: rgba(74, 222, 128, 0.9);
-    }
+    #crosshair::before, #crosshair::after { content: ''; position: absolute; background: rgba(74, 222, 128, 0.9); }
     #crosshair::before { top: 50%; left: 0; right: 0; height: 1px; }
     #crosshair::after { left: 50%; top: 0; bottom: 0; width: 1px; }
 
@@ -41,7 +29,7 @@
       position: fixed; top: 0; left: 0; right: 0;
       background: rgba(0,0,0,0.78); color: white;
       padding: 6px 10px; z-index: 100;
-      font-size: 11px; max-height: 30vh; overflow-y: auto;
+      font-size: 11px; max-height: 32vh; overflow-y: auto;
     }
     #ui h3 { margin: 0 0 3px 0; font-size: 12px; }
     #status { font-family: monospace; font-size: 10px; line-height: 1.4; }
@@ -63,8 +51,7 @@
     #file-input button {
       display: block; width: 100%; padding: 10px; margin: 5px 0;
       background: #2563eb; color: white; border: none;
-      border-radius: 8px; font-size: 13px; cursor: pointer;
-      font-weight: 600;
+      border-radius: 8px; font-size: 13px; cursor: pointer; font-weight: 600;
     }
     #file-input button:disabled { background: #444; color: #888; }
     #file-input button.start-btn { background: #16a34a; font-size: 14px; padding: 12px; }
@@ -72,89 +59,35 @@
     #file-input .file-label {
       display: block; width: 100%; padding: 9px; margin: 4px 0;
       background: #1e40af; color: white; border: 2px dashed #60a5fa;
-      border-radius: 8px; font-size: 12px; cursor: pointer;
-      font-weight: 500;
+      border-radius: 8px; font-size: 12px; cursor: pointer; font-weight: 500;
     }
     .file-label.has-file { background: #166534 !important; border-color: #4ade80 !important; }
     #file-input input[type=file] { display: none; }
-    .file-status {
-      font-size: 9px; padding: 4px;
-      background: rgba(0,0,0,0.4); border-radius: 6px;
-      margin: 3px 0; min-height: 12px;
-      font-family: monospace; text-align: left;
-    }
-    .opts {
-      display: flex; gap: 6px; align-items: center;
-      justify-content: space-between; margin: 4px 0; font-size: 11px;
-      padding: 5px 8px; background: rgba(255,255,255,0.05); border-radius: 6px;
-    }
-    .opts input[type=number] {
-      width: 70px; padding: 4px; border-radius: 6px;
-      border: 1px solid #555; background: #222; color: white; font-size: 11px;
-    }
-    .opts label.checkbox {
-      display: flex; align-items: center; gap: 6px;
-      width: 100%; cursor: pointer; font-size: 11px;
-    }
+    .file-status { font-size: 9px; padding: 4px; background: rgba(0,0,0,0.4); border-radius: 6px; margin: 3px 0; min-height: 12px; font-family: monospace; text-align: left; }
+    .opts { display: flex; gap: 6px; align-items: center; justify-content: space-between; margin: 4px 0; font-size: 11px; padding: 5px 8px; background: rgba(255,255,255,0.05); border-radius: 6px; }
+    .opts input[type=number] { width: 70px; padding: 4px; border-radius: 6px; border: 1px solid #555; background: #222; color: white; font-size: 11px; }
+    .opts label.checkbox { display: flex; align-items: center; gap: 6px; width: 100%; cursor: pointer; font-size: 11px; }
     .opts input[type=checkbox] { width: 16px; height: 16px; }
-    .section-header {
-      font-size: 10px; font-weight: 600; color: #60a5fa;
-      margin: 6px 0 2px 0; text-align: left;
-      border-bottom: 1px solid #334155; padding-bottom: 2px;
-    }
+    .section-header { font-size: 10px; font-weight: 600; color: #60a5fa; margin: 6px 0 2px 0; text-align: left; border-bottom: 1px solid #334155; padding-bottom: 2px; }
 
-    #minimap-container {
-      position: fixed;
-      bottom: 50px; right: 8px;
-      z-index: 110;
-      background: rgba(0,0,0,0.75);
-      border: 2px solid #4ade80;
-      border-radius: 50%;
-      padding: 4px;
-      display: none;
-    }
+    #minimap-container { position: fixed; bottom: 50px; right: 8px; z-index: 110; background: rgba(0,0,0,0.75); border: 2px solid #4ade80; border-radius: 50%; padding: 4px; display: none; }
     #minimap { display: block; border-radius: 50%; }
 
-    #legend {
-      position: fixed; bottom: 8px; left: 8px; right: 8px;
-      background: rgba(0,0,0,0.78); color: white;
-      padding: 5px 8px; border-radius: 8px;
-      font-size: 9px; z-index: 100;
-      display: none; flex-wrap: wrap; gap: 6px; justify-content: center;
-    }
+    #legend { position: fixed; bottom: 8px; left: 8px; right: 8px; background: rgba(0,0,0,0.78); color: white; padding: 5px 8px; border-radius: 8px; font-size: 9px; z-index: 100; display: none; flex-wrap: wrap; gap: 6px; justify-content: center; }
     .swatch { display: inline-block; width: 9px; height: 9px; margin-right: 3px; vertical-align: middle; border-radius: 2px; }
 
-    #log {
-      position: fixed; top: 32%; left: 8px; right: 8px;
-      background: rgba(0,0,0,0.88); color: #4ade80;
-      padding: 8px; border-radius: 8px;
-      font-family: monospace; font-size: 9px;
-      z-index: 150; max-height: 45vh; overflow-y: auto;
-      display: none; white-space: pre-wrap;
-    }
+    #log { position: fixed; top: 34%; left: 8px; right: 8px; background: rgba(0,0,0,0.88); color: #4ade80; padding: 8px; border-radius: 8px; font-family: monospace; font-size: 9px; z-index: 150; max-height: 45vh; overflow-y: auto; display: none; white-space: pre-wrap; }
 
-    #floating-ctrl {
-      position: fixed; right: 8px; top: 32%;
-      display: none;
-      flex-direction: column; gap: 5px;
-      z-index: 110;
-    }
-    #floating-ctrl button {
-      width: 40px; height: 40px;
-      border-radius: 50%;
-      border: none;
-      color: white;
-      font-size: 14px;
-      box-shadow: 0 2px 6px rgba(0,0,0,0.5);
-    }
+    #floating-ctrl { position: fixed; right: 8px; top: 34%; display: none; flex-direction: column; gap: 5px; z-index: 110; }
+    #floating-ctrl button { width: 40px; height: 40px; border-radius: 50%; border: none; color: white; font-size: 14px; box-shadow: 0 2px 6px rgba(0,0,0,0.5); }
     #floating-ctrl button.cal { background: rgba(245, 158, 11, 0.9); }
-    #floating-ctrl button.h { background: rgba(37, 99, 235, 0.9); }
+    #floating-ctrl button.gnd { background: rgba(168, 85, 247, 0.9); font-size: 11px; }
     #floating-ctrl button.tog { background: rgba(139, 92, 246, 0.9); font-size: 11px; }
 
     #aim-info {
       position: fixed; top: 50%; left: 50%;
       transform: translate(-50%, calc(-50% + 30px));
-      background: rgba(0,0,0,0.82);
+      background: rgba(0,0,0,0.85);
       color: #4ade80;
       padding: 6px 10px;
       border-radius: 6px;
@@ -165,10 +98,8 @@
       display: none;
       white-space: pre;
       text-align: left;
-      min-width: 160px;
+      min-width: 180px;
     }
-    #aim-info .blk { color: #fbbf24; }
-    #aim-info .ter { color: #cbd5e1; }
   </style>
 </head>
 <body>
@@ -180,29 +111,29 @@
 <div id="aim-info"></div>
 
 <div id="file-input">
-  <h3>AR OLS Viewer v7</h3>
-  <p style="font-size:9px;opacity:0.7;margin:2px 0">+ Height blocks + Terrain mesh</p>
+  <h3>AR OLS Viewer v8</h3>
+  <p style="font-size:9px;opacity:0.7;margin:2px 0">True MSL coordinate system</p>
 
   <div class="section-header">1. OLS Surface</div>
   <label for="geojson-file" class="file-label" id="ols-label">📂 OLS GeoJSON</label>
   <input type="file" id="geojson-file" accept=".geojson,.json">
   <div id="ols-status" class="file-status">ยังไม่ได้เลือก</div>
 
-  <div class="section-header">2. DTM (จำเป็นสำหรับ terrain)</div>
+  <div class="section-header">2. DTM (จำเป็น!)</div>
   <label for="dtm-header-file" class="file-label" id="dtm-header-label">📂 DTM .json</label>
   <input type="file" id="dtm-header-file" accept=".json">
   <label for="dtm-bin-file" class="file-label" id="dtm-bin-label">📂 DTM .dtm</label>
   <input type="file" id="dtm-bin-file" accept=".dtm,application/octet-stream">
-  <div id="dtm-status" class="file-status">ไม่บังคับ</div>
+  <div id="dtm-status" class="file-status">จำเป็นเพื่อความแม่นยำ</div>
 
-  <div class="section-header">3. Height block grid (ใหม่!)</div>
+  <div class="section-header">3. Height blocks</div>
   <label for="hblock-file" class="file-label" id="hblock-label">📂 height block GeoJSON</label>
   <input type="file" id="hblock-file" accept=".geojson,.json">
   <div id="hblock-status" class="file-status">ไม่บังคับ</div>
 
   <div class="section-header">4. ตัวเลือก</div>
   <div class="opts">
-    <span>Manual ground MSL:</span>
+    <span>Manual ground MSL (fallback):</span>
     <span><input type="number" id="manual-ground" value="30" step="1"> m</span>
   </div>
   <div class="opts">
@@ -218,43 +149,26 @@
     <span><input type="number" id="terrain-radius" value="1000" min="200" max="3000" step="200"> m</span>
   </div>
   <div class="opts">
-    <label class="checkbox">
-      <input type="checkbox" id="show-terrain" checked>
-      <span>แสดง terrain mesh</span>
-    </label>
+    <label class="checkbox"><input type="checkbox" id="show-terrain" checked><span>Terrain mesh</span></label>
   </div>
   <div class="opts">
-    <label class="checkbox">
-      <input type="checkbox" id="show-blocks" checked>
-      <span>แสดง height blocks</span>
-    </label>
+    <label class="checkbox"><input type="checkbox" id="show-blocks" checked><span>Height blocks</span></label>
   </div>
   <div class="opts">
-    <label class="checkbox">
-      <input type="checkbox" id="show-labels" checked>
-      <span>แสดง label ตัวเลข</span>
-    </label>
+    <label class="checkbox"><input type="checkbox" id="show-labels" checked><span>Labels</span></label>
   </div>
   <div class="opts">
-    <label class="checkbox">
-      <input type="checkbox" id="debug-markers" checked>
-      <span>Debug markers</span>
-    </label>
+    <label class="checkbox"><input type="checkbox" id="debug-markers"><span>Debug markers</span></label>
   </div>
   <div class="opts">
-    <label class="checkbox">
-      <input type="checkbox" id="test-mode">
-      <span>โหมดทดสอบ</span>
-    </label>
+    <label class="checkbox"><input type="checkbox" id="test-mode"><span>โหมดทดสอบ</span></label>
   </div>
 
-  <button class="start-btn" id="start-btn" onclick="startAR()" disabled>
-    ▶ เริ่มดู AR
-  </button>
+  <button class="start-btn" id="start-btn" onclick="startAR()" disabled>▶ เริ่มดู AR</button>
 </div>
 
 <div id="ui" style="display:none">
-  <h3>AR OLS v7</h3>
+  <h3>AR OLS v8</h3>
   <div id="status">เริ่มต้น...</div>
 </div>
 
@@ -265,7 +179,7 @@
   <div><span class="swatch" style="background:#f59e0b"></span>Take-off</div>
   <div><span class="swatch" style="background:#ec4899"></span>Trans</div>
   <div><span class="swatch" style="background:#10b981"></span>Block สูง</div>
-  <div><span class="swatch" style="background:#ef4444"></span>Block ต่ำ</div>
+  <div><span class="swatch" style="background:#ef4444"></span>Block ต่ำ/ลบ</div>
   <div><span class="swatch" style="background:#94a3b8"></span>Terrain</div>
 </div>
 
@@ -278,12 +192,12 @@
   <button class="cal" onclick="adjustHeading(-1)">⟲1</button>
   <button class="cal" onclick="adjustHeading(1)">⟳1</button>
   <button class="cal" onclick="adjustHeading(5)">⟳5</button>
-  <button class="h" onclick="adjustHeight(-5)">⬇</button>
-  <button class="h" onclick="adjustHeight(5)">⬆</button>
+  <button class="gnd" onclick="adjustGround(-1)">G−</button>
+  <button class="gnd" onclick="adjustGround(1)">G+</button>
   <button class="tog" onclick="toggleLayer('terrain')">TER</button>
   <button class="tog" onclick="toggleLayer('blocks')">BLK</button>
   <button class="tog" onclick="toggleLayer('labels')">LBL</button>
-  <button class="h" onclick="toggleLog()">🔍</button>
+  <button class="cal" onclick="toggleLog()">🔍</button>
 </div>
 
 <div id="log"></div>
