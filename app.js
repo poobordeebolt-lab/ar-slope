@@ -1,46 +1,63 @@
 // =============================================
-// AR OLS Surface Viewer v9
-// + Slider controls (drag instead of buttons)
-// + Smart DTM sampling at user (3x3 average)
-// + SNAP button: auto-fit terrain to feet
-// + OLS toggle
-// + Real-time slider updates without re-render
+// AR Pre-Survey v10
+//
+// Purpose: ใช้โทรศัพท์ตรวจสอบว่าวัตถุจริง (ต้นไม้, เสาไฟ)
+// เกิน OLS/OCS surfaces หรือไม่
+//
+// หลักการ:
+//   - ข้อมูลทั้งหมด (OLS, OCS, DTM) อยู่ใน WGS84 ellipsoidal height
+//   - ระดับพื้น = DTM(lat,lon) ← แม่นยำกว่า GPS altitude มาก
+//   - ระดับตา = DTM + 1.6m
+//   - GPS altitude ไม่ใช้ในการคำนวณ (แสดงเพื่อเปรียบเทียบเท่านั้น)
+//   - Phone ใช้แค่: GPS(lat,lon) + IMU(orientation)
 // =============================================
 
+// --- Data ---
 let userPos = null;
 let userHeading = 0;
-let surfaceData = null;
+let olsData = null;           // OLS GeoJSON FeatureCollection
+let ocsData = null;           // OCS GeoJSON FeatureCollection
 let dtmHeader = null;
 let dtmData = null;
 let heightBlockData = null;
 
+// --- Settings ---
 let renderRadius = 8000;
 let blockRadius = 2000;
 let terrainRadius = 1000;
 let testMode = false;
+const EYE_HEIGHT = 1.6;      // ความสูงตาจากพื้น (m)
 
+// --- Layer toggles ---
 let showOLS = true;
+let showOCS = true;
 let showTerrain = true;
 let showBlocks = true;
 let showLabels = true;
 
+// --- Computed state ---
 let headingOffset = 0;
-let manualGroundMSL = 30;
-let userGroundMSL = null;
-let userEyeMSL = null;
+let manualGroundElip = 18;    // fallback ถ้า DTM ไม่มีข้อมูล
+let userGroundElip = null;    // DTM value ณ ตำแหน่ง user (ellipsoidal)
+let userEyeElip = null;       // userGroundElip + EYE_HEIGHT
 let groundOffset = 0;
 let anchorPos = null;
 
-let allFeaturesEnu = [];
+// --- Precomputed features ---
+let allOlsFeatures = [];
+let allOcsFeatures = [];
 let allBlocksEnu = [];
 
+// --- Three.js ---
 let renderer, scene, camera, worldGroup;
-let surfaceMeshes = [];
+let olsMeshes = [];
+let ocsMeshes = [];
 let blockMeshes = [];
 let labelSprites = [];
 let terrainMesh = null;
 
-const SURFACE_COLORS = {
+// --- Colors ---
+const OLS_COLORS = {
   'inner horizontal': 0x3b82f6,
   'conical':          0x8b5cf6,
   'approach':         0x22c55e,
@@ -50,13 +67,32 @@ const SURFACE_COLORS = {
   'default':          0x94a3b8
 };
 
-function getSurfaceColor(name) {
-  if (!name) return SURFACE_COLORS.default;
+const OCS_COLORS = {
+  'area 2a': 0x06b6d4,
+  'area 2b': 0x0891b2,
+  'area 2c': 0x0e7490,
+  'area 2d': 0x155e75,
+  'area 3':  0x164e63,
+  'area 4':  0x083344,
+  'default': 0x06b6d4
+};
+
+function getOlsColor(name) {
+  if (!name) return OLS_COLORS.default;
   const lower = name.toLowerCase();
-  for (const key in SURFACE_COLORS) {
-    if (lower.includes(key)) return SURFACE_COLORS[key];
+  for (const key in OLS_COLORS) {
+    if (lower.includes(key)) return OLS_COLORS[key];
   }
-  return SURFACE_COLORS.default;
+  return OLS_COLORS.default;
+}
+
+function getOcsColor(name) {
+  if (!name) return OCS_COLORS.default;
+  const lower = name.toLowerCase();
+  for (const key in OCS_COLORS) {
+    if (lower.includes(key)) return OCS_COLORS[key];
+  }
+  return OCS_COLORS.default;
 }
 
 function getHeightBlockColor(maxHeight) {
@@ -67,6 +103,9 @@ function getHeightBlockColor(maxHeight) {
   return new THREE.Color(r, g, b);
 }
 
+// ============================================================
+// Logging & Status
+// ============================================================
 function showLog(msg, isError = false) {
   console.log(msg);
   const logEl = document.getElementById('log');
@@ -94,18 +133,20 @@ function setStatus(html) {
 let dtmHeaderLoaded = false, dtmBinLoaded = false;
 
 function checkReadyToStart() {
-  document.getElementById('start-btn').disabled = !surfaceData;
+  const hasSurface = olsData || ocsData;
+  document.getElementById('start-btn').disabled = !hasSurface;
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-  document.getElementById('geojson-file').addEventListener('change', (e) => {
+  // OLS file
+  document.getElementById('ols-file').addEventListener('change', (e) => {
     const file = e.target.files[0]; if (!file) return;
     const r = new FileReader();
     r.onload = (evt) => {
       try {
-        surfaceData = JSON.parse(evt.target.result);
-        if (!surfaceData.features) throw new Error('not FeatureCollection');
-        document.getElementById('ols-status').innerHTML = `<span style="color:#4ade80">✓ ${surfaceData.features.length} features</span>`;
+        olsData = JSON.parse(evt.target.result);
+        if (!olsData.features) throw new Error('not FeatureCollection');
+        document.getElementById('ols-status').innerHTML = `<span style="color:#4ade80">✓ ${olsData.features.length} features</span>`;
         document.getElementById('ols-label').classList.add('has-file');
         document.getElementById('ols-label').textContent = `✓ ${file.name}`;
         checkReadyToStart();
@@ -116,13 +157,33 @@ document.addEventListener('DOMContentLoaded', () => {
     r.readAsText(file);
   });
 
+  // OCS file
+  document.getElementById('ocs-file').addEventListener('change', (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    const r = new FileReader();
+    r.onload = (evt) => {
+      try {
+        ocsData = JSON.parse(evt.target.result);
+        if (!ocsData.features) throw new Error('not FeatureCollection');
+        document.getElementById('ocs-status').innerHTML = `<span style="color:#4ade80">✓ ${ocsData.features.length} features</span>`;
+        document.getElementById('ocs-label').classList.add('has-file');
+        document.getElementById('ocs-label').textContent = `✓ ${file.name}`;
+        checkReadyToStart();
+      } catch (err) {
+        document.getElementById('ocs-status').innerHTML = `<span style="color:#f87171">✗ ${err.message}</span>`;
+      }
+    };
+    r.readAsText(file);
+  });
+
+  // DTM header
   document.getElementById('dtm-header-file').addEventListener('change', (e) => {
     const file = e.target.files[0]; if (!file) return;
     const r = new FileReader();
     r.onload = (evt) => {
       try {
         dtmHeader = JSON.parse(evt.target.result);
-        if (!dtmHeader.bbox || !dtmHeader.width) throw new Error('invalid');
+        if (!dtmHeader.bbox || !dtmHeader.width) throw new Error('invalid header');
         dtmHeaderLoaded = true;
         document.getElementById('dtm-header-label').classList.add('has-file');
         document.getElementById('dtm-header-label').textContent = `✓ ${file.name}`;
@@ -132,6 +193,7 @@ document.addEventListener('DOMContentLoaded', () => {
     r.readAsText(file);
   });
 
+  // DTM binary
   document.getElementById('dtm-bin-file').addEventListener('change', (e) => {
     const file = e.target.files[0]; if (!file) return;
     const r = new FileReader();
@@ -147,6 +209,7 @@ document.addEventListener('DOMContentLoaded', () => {
     r.readAsArrayBuffer(file);
   });
 
+  // Height blocks
   document.getElementById('hblock-file').addEventListener('change', (e) => {
     const file = e.target.files[0]; if (!file) return;
     const r = new FileReader();
@@ -167,17 +230,17 @@ function updateDtmStatus() {
   const status = document.getElementById('dtm-status');
   if (dtmHeaderLoaded && dtmBinLoaded) {
     if (dtmData.length !== dtmHeader.width * dtmHeader.height) {
-      status.innerHTML = `<span style="color:#f87171">✗ size mismatch</span>`;
+      status.innerHTML = `<span style="color:#f87171">✗ size mismatch: ${dtmData.length} ≠ ${dtmHeader.width * dtmHeader.height}</span>`;
       return;
     }
-    status.innerHTML = `<span style="color:#4ade80">✓ ${dtmHeader.width}×${dtmHeader.height}</span>`;
+    status.innerHTML = `<span style="color:#4ade80">✓ ${dtmHeader.width}×${dtmHeader.height} (ellipsoidal)</span>`;
   } else {
     status.innerHTML = '<span style="color:#fbbf24">รออีกไฟล์...</span>';
   }
 }
 
 // ============================================================
-// DTM sampling — single point (bilinear)
+// DTM sampling — bilinear interpolation
 // ============================================================
 function sampleDTM(lat, lon) {
   if (!dtmHeader || !dtmData) return null;
@@ -201,16 +264,12 @@ function sampleDTM(lat, lon) {
   return v0 * (1 - dy) + v1 * dy;
 }
 
-// Smart sampling: average a 3x3 grid around the point (radius ~30m at GEDTM30)
-// Also returns min/max for diagnostics
+// 3×3 grid average for robust ground estimation
 function sampleDTMArea(lat, lon, radiusM = 30) {
   if (!dtmHeader || !dtmData) return null;
-  // Convert radius to degrees
   const dLat = radiusM / 111320;
   const dLon = radiusM / (111320 * Math.cos(lat * Math.PI / 180));
-
   const samples = [];
-  // Sample 3x3 grid
   for (let i = -1; i <= 1; i++) {
     for (let j = -1; j <= 1; j++) {
       const v = sampleDTM(lat + i * dLat, lon + j * dLon);
@@ -231,14 +290,16 @@ function sampleDTMArea(lat, lon, radiusM = 30) {
 // Start AR
 // ============================================================
 async function startAR() {
-  if (!surfaceData) return;
+  if (!olsData && !ocsData) return;
   renderRadius = parseInt(document.getElementById('render-radius').value) || 8000;
   blockRadius = parseInt(document.getElementById('block-radius').value) || 2000;
   terrainRadius = parseInt(document.getElementById('terrain-radius').value) || 1000;
   testMode = document.getElementById('test-mode').checked;
-  manualGroundMSL = parseFloat(document.getElementById('manual-ground').value) || 30;
+  manualGroundElip = parseFloat(document.getElementById('manual-ground').value) || 18;
 
-  showLog('=== AR v9 ===');
+  showLog('=== AR Pre-Survey v10 ===');
+  showLog('หลักการ: DTM = ground truth, GPS alt = ไม่ใช้');
+  showLog(`Layers: OLS=${!!olsData} OCS=${!!ocsData} DTM=${!!dtmData} Blocks=${!!heightBlockData}`);
 
   document.getElementById('file-input').style.display = 'none';
   document.getElementById('ui').style.display = 'block';
@@ -248,7 +309,14 @@ async function startAR() {
   document.getElementById('crosshair').style.display = 'block';
   document.getElementById('aim-info').style.display = 'block';
 
-  // Bind sliders
+  // Hide toggle buttons for layers that aren't loaded
+  if (!olsData) document.getElementById('btn-ols').style.display = 'none';
+  if (!ocsData) document.getElementById('btn-ocs').style.display = 'none';
+  if (!heightBlockData) {
+    document.getElementById('btn-blk').style.display = 'none';
+    document.getElementById('btn-lbl').style.display = 'none';
+  }
+
   setupSliders();
 
   if (typeof DeviceOrientationEvent !== 'undefined' &&
@@ -283,9 +351,7 @@ function setupSliders() {
   groundSlider.addEventListener('input', (e) => {
     groundOffset = parseFloat(e.target.value);
     groundVal.textContent = groundOffset.toFixed(1);
-    applyGroundOffsetLive();
   });
-
   const headingSlider = document.getElementById('heading-slider');
   const headingVal = document.getElementById('heading-val');
   headingSlider.addEventListener('input', (e) => {
@@ -300,6 +366,9 @@ function adjustHeadingSlider(delta) {
   document.getElementById('heading-val').textContent = headingOffset.toFixed(0);
 }
 
+// ============================================================
+// Three.js setup
+// ============================================================
 function initThree() {
   renderer = new THREE.WebGLRenderer({
     canvas: document.getElementById('three-canvas'),
@@ -325,20 +394,15 @@ function animate() {
   requestAnimationFrame(animate);
   if (deviceOrientation) updateCameraFromOrientation();
   if (worldGroup) {
-    // Apply heading offset rotation
     worldGroup.rotation.y = headingOffset * Math.PI / 180;
-    // Apply ground offset as a Y translation of the WHOLE world
-    // Negative offset = shift everything down (terrain comes to feet)
     worldGroup.position.y = -groundOffset;
   }
   renderer.render(scene, camera);
 }
 
-function applyGroundOffsetLive() {
-  // Just updating worldGroup.position.y in animate() — no re-render needed!
-  // This is much faster than re-creating geometries
-}
-
+// ============================================================
+// Device orientation (IMU)
+// ============================================================
 let deviceOrientation = null;
 function startSensors() {
   function handle(event) {
@@ -371,10 +435,10 @@ function updateCameraFromOrientation() {
 }
 
 // ============================================================
-// GPS & render
+// GPS → decide ground from DTM → render
 // ============================================================
 function waitForGPSThenRender() {
-  showLog('Waiting for GPS...');
+  showLog('รอ GPS fix...');
   setStatus('รอ GPS fix...');
   navigator.geolocation.watchPosition((pos) => {
     userPos = {
@@ -383,8 +447,10 @@ function waitForGPSThenRender() {
       altAcc: pos.coords.altitudeAccuracy
     };
     if (!window._rendered) {
-      showLog(`GPS: ${userPos.lat.toFixed(5)}, ${userPos.lon.toFixed(5)} ±${userPos.acc.toFixed(0)}m`);
-      if (userPos.alt) showLog(`GPS alt (ellipsoidal): ${userPos.alt.toFixed(1)}m`);
+      showLog(`GPS: ${userPos.lat.toFixed(6)}, ${userPos.lon.toFixed(6)} ±${userPos.acc.toFixed(0)}m`);
+      if (userPos.alt != null) {
+        showLog(`GPS alt (ellipsoidal, ไม่ใช้): ${userPos.alt.toFixed(1)}m ±${(userPos.altAcc||'?')}m`);
+      }
       decideAnchorAndRender();
       window._rendered = true;
       setTimeout(() => { const l = document.getElementById('log'); if (l) l.style.display = 'none'; }, 15000);
@@ -394,37 +460,48 @@ function waitForGPSThenRender() {
 }
 
 function decideAnchorAndRender() {
+  // Test mode: shift data to user's position
   if (testMode) {
-    const c = computeFeaturesCentroid(surfaceData);
+    const allData = [olsData, ocsData].filter(Boolean);
+    const c = computeFeaturesCentroid(allData[0]);
     if (c) {
       const dLat = userPos.lat - c.lat, dLon = userPos.lon - c.lon;
-      shiftAllCoords(surfaceData, dLat, dLon);
+      allData.forEach(d => shiftAllCoords(d, dLat, dLon));
       if (heightBlockData) shiftAllCoords(heightBlockData, dLat, dLon);
-      showLog('Test: shifted to user');
+      showLog('Test: shifted all data to user position');
     }
   }
+
   anchorPos = { lat: userPos.lat, lon: userPos.lon };
 
-  // SMART DTM SAMPLING: 3x3 grid around user, take MEAN
+  // ★ หลักการสำคัญ: ใช้ DTM เป็น ground truth แทน GPS altitude
   const sampleResult = sampleDTMArea(anchorPos.lat, anchorPos.lon, 30);
   if (sampleResult !== null) {
-    userGroundMSL = sampleResult.mean;
-    showLog(`✓ DTM ground (3x3 mean): ${userGroundMSL.toFixed(2)}m`);
-    showLog(`  range: ${sampleResult.min.toFixed(1)} to ${sampleResult.max.toFixed(1)}m (n=${sampleResult.n})`);
+    userGroundElip = sampleResult.mean;
+    showLog(`✓ DTM ground (ellipsoidal): ${userGroundElip.toFixed(2)}m`);
+    showLog(`  3×3 range: ${sampleResult.min.toFixed(1)}–${sampleResult.max.toFixed(1)}m (n=${sampleResult.n})`);
+    if (userPos.alt != null) {
+      const diff = userPos.alt - userGroundElip;
+      showLog(`  GPS vs DTM ต่างกัน: ${diff.toFixed(1)}m (GPS ไม่แม่นยำ)`);
+    }
   } else {
-    userGroundMSL = manualGroundMSL;
-    showLog(`⚠ DTM nodata at user → manual: ${userGroundMSL}m`, true);
+    userGroundElip = manualGroundElip;
+    showLog(`⚠ DTM ไม่มีข้อมูลตรงนี้ → ใช้ fallback: ${userGroundElip}m`, true);
   }
-  userEyeMSL = userGroundMSL + 1.6;
-  showLog(`Eye MSL: ${userEyeMSL.toFixed(2)}m`);
 
-  precomputeFeatures();
+  userEyeElip = userGroundElip + EYE_HEIGHT;
+  showLog(`ระดับตา (ellipsoidal): ${userEyeElip.toFixed(2)}m`);
+
+  // Precompute & render
+  if (olsData) precomputeFeatures(olsData, allOlsFeatures, getOlsColor);
+  if (ocsData) precomputeFeatures(ocsData, allOcsFeatures, getOcsColor);
   if (heightBlockData) precomputeBlocks();
   renderAll();
 }
 
 function renderAll() {
-  renderSurfaces();
+  if (olsData) renderSurfaceLayer(allOlsFeatures, olsMeshes, 'ols', 0.35);
+  if (ocsData) renderSurfaceLayer(allOcsFeatures, ocsMeshes, 'ocs', 0.30);
   if (heightBlockData) renderHeightBlocks();
   if (dtmData) renderTerrain();
   applyVisibility();
@@ -432,28 +509,37 @@ function renderAll() {
 }
 
 function applyVisibility() {
-  surfaceMeshes.forEach(m => m.visible = showOLS);
+  olsMeshes.forEach(m => m.visible = showOLS);
+  ocsMeshes.forEach(m => m.visible = showOCS);
   blockMeshes.forEach(m => m.visible = showBlocks);
   labelSprites.forEach(s => s.visible = showBlocks && showLabels);
   if (terrainMesh) terrainMesh.visible = showTerrain;
 }
 
 function printSurfaceSummary() {
-  showLog('\n=== Distances ===');
-  showLog(`Eye MSL: ${userEyeMSL.toFixed(1)}m (ground ${userGroundMSL.toFixed(1)})`);
-  allFeaturesEnu.forEach(p => {
-    if (p.minDist > renderRadius) return;
-    let minA = Infinity, maxA = -Infinity;
-    p.rings.forEach(ring => ring.forEach(([lon, lat, alt]) => {
-      if (alt < minA) minA = alt;
-      if (alt > maxA) maxA = alt;
-    }));
-    const heightAboveEye = minA - userEyeMSL;
-    const angle = Math.atan(heightAboveEye / Math.max(p.minDist, 1)) * 180 / Math.PI;
-    showLog(`${p.name.substring(0, 22)}: MSL ${minA.toFixed(0)}-${maxA.toFixed(0)}, ${p.minDist.toFixed(0)}m, ${angle.toFixed(1)}°`);
-  });
+  showLog('\n=== Surface Summary ===');
+  showLog(`ระดับตา: ${userEyeElip.toFixed(1)}m ellip (พื้น ${userGroundElip.toFixed(1)}m)`);
+
+  function logFeatures(features, label) {
+    features.forEach(p => {
+      if (p.minDist > renderRadius) return;
+      let minA = Infinity, maxA = -Infinity;
+      p.rings.forEach(ring => ring.forEach(([lon, lat, alt]) => {
+        if (alt < minA) minA = alt;
+        if (alt > maxA) maxA = alt;
+      }));
+      const clearance = minA - userGroundElip;
+      const angle = Math.atan((minA - userEyeElip) / Math.max(p.minDist, 1)) * 180 / Math.PI;
+      showLog(`[${label}] ${p.name.substring(0, 20)}: ${minA.toFixed(0)}–${maxA.toFixed(0)}m, ${p.minDist.toFixed(0)}m, clearance ${clearance.toFixed(0)}m`);
+    });
+  }
+  logFeatures(allOlsFeatures, 'OLS');
+  logFeatures(allOcsFeatures, 'OCS');
 }
 
+// ============================================================
+// Coordinate helpers
+// ============================================================
 function computeFeaturesCentroid(geojson) {
   let sumLat=0, sumLon=0, n=0;
   function w(c){ if(typeof c[0]==='number'){sumLon+=c[0];sumLat+=c[1];n++;} else c.forEach(w); }
@@ -465,16 +551,16 @@ function shiftAllCoords(geojson, dLat, dLon) {
   geojson.features.forEach(f => w(f.geometry.coordinates));
 }
 
-// Coordinate conversion: lat/lon/MSL → camera-relative ENU
-// Note: groundOffset is NOT applied here; it's applied via worldGroup.position.y in animate()
-function llToCamRel(lat, lon, mslAlt) {
+// Convert lat/lon/ellipsoidal_alt to camera-relative position
+// Y axis = up, relative to user's eye level
+function llToCamRel(lat, lon, elipAlt) {
   const R = 6378137;
   const dLat = (lat - anchorPos.lat) * Math.PI / 180;
   const dLon = (lon - anchorPos.lon) * Math.PI / 180;
   const refLat = anchorPos.lat * Math.PI / 180;
   const east = dLon * R * Math.cos(refLat);
   const north = dLat * R;
-  return { x: east, y: mslAlt - userEyeMSL, z: -north };
+  return { x: east, y: elipAlt - userEyeElip, z: -north };
 }
 
 function horizDist(lat, lon) {
@@ -488,13 +574,13 @@ function horizDist(lat, lon) {
 }
 
 // ============================================================
-// OLS surfaces
+// Precompute & render surfaces (shared for OLS/OCS)
 // ============================================================
-function precomputeFeatures() {
-  allFeaturesEnu = [];
-  surfaceData.features.forEach((feat, idx) => {
-    const name = feat.properties?.name || `Feature ${idx}`;
-    const color = getSurfaceColor(name);
+function precomputeFeatures(geojsonData, targetArray, colorFn) {
+  targetArray.length = 0;
+  geojsonData.features.forEach((feat, idx) => {
+    const name = feat.properties?.name || feat.properties?.Name || `Feature ${idx}`;
+    const color = colorFn(name);
     let polygons = [];
     if (feat.geometry.type === 'Polygon') polygons = [feat.geometry.coordinates];
     else if (feat.geometry.type === 'MultiPolygon') polygons = feat.geometry.coordinates;
@@ -505,25 +591,25 @@ function precomputeFeatures() {
         const d = horizDist(lat, lon);
         if (d < minDist) minDist = d;
       }));
-      allFeaturesEnu.push({ name, color, rings, minDist });
+      targetArray.push({ name, color, rings, minDist });
     });
   });
-  showLog(`OLS: ${allFeaturesEnu.length} polys`);
+  showLog(`Precomputed: ${targetArray.length} polygons`);
 }
 
-function renderSurfaces() {
-  surfaceMeshes.forEach(m => worldGroup.remove(m));
-  surfaceMeshes = [];
+function renderSurfaceLayer(features, meshArray, layerKind, opacity) {
+  meshArray.forEach(m => worldGroup.remove(m));
+  meshArray.length = 0;
   let n = 0;
-  allFeaturesEnu.forEach(p => {
+  features.forEach(p => {
     if (p.minDist > renderRadius) return;
-    const mesh = createPolygonMesh(p.rings, p.color, p.name, 0.35);
-    if (mesh) { worldGroup.add(mesh); surfaceMeshes.push(mesh); n++; }
+    const mesh = createPolygonMesh(p.rings, p.color, p.name, opacity, layerKind);
+    if (mesh) { worldGroup.add(mesh); meshArray.push(mesh); n++; }
   });
-  showLog(`OLS rendered: ${n}`);
+  showLog(`${layerKind.toUpperCase()} rendered: ${n}`);
 }
 
-function createPolygonMesh(rings, color, name, opacity) {
+function createPolygonMesh(rings, color, name, opacity, kind) {
   const outer = rings[0];
   if (!outer || outer.length < 3) return null;
   const flat2D = [], pos3D = [], holeIdx = [];
@@ -552,7 +638,7 @@ function createPolygonMesh(rings, color, name, opacity) {
     side: THREE.DoubleSide, depthWrite: false
   });
   const mesh = new THREE.Mesh(geom, mat);
-  mesh.userData = { name, kind: 'surface' };
+  mesh.userData = { name, kind };
   mesh.add(new THREE.Mesh(geom, new THREE.MeshBasicMaterial({
     color: color, wireframe: true, transparent: true, opacity: 0.7
   })));
@@ -587,12 +673,13 @@ function precomputeBlocks() {
     const cLat = sumLat / n, cLon = sumLon / n;
     const maxH = parseFloat(feat.properties.max_height_allowance);
     if (isNaN(maxH)) return;
-    let terrainMSL = sampleDTM(cLat, cLon);
-    if (terrainMSL === null) terrainMSL = userGroundMSL;
-    const surfaceMSL = terrainMSL + maxH;
+    // Block surface = DTM at center + allowed height
+    let terrainElip = sampleDTM(cLat, cLon);
+    if (terrainElip === null) terrainElip = userGroundElip;
+    const surfaceElip = terrainElip + maxH;
     allBlocksEnu.push({
       ring, minDist, centroidLat: cLat, centroidLon: cLon,
-      maxHeight: maxH, terrainMSL, surfaceMSL,
+      maxHeight: maxH, terrainElip, surfaceElip,
       name: feat.properties.Name || 'Block',
       designator: feat.properties.designator || ''
     });
@@ -629,9 +716,10 @@ function createBlockMesh(block) {
   for (let i = 0; i < lastIdx; i++) {
     const [lon, lat] = ring[i];
     let vTerrain = sampleDTM(lat, lon);
-    if (vTerrain === null) vTerrain = block.terrainMSL;
-    const vSurfaceMSL = vTerrain + block.maxHeight;
-    const c = llToCamRel(lat, lon, vSurfaceMSL);
+    if (vTerrain === null) vTerrain = block.terrainElip;
+    // Max allowed height = terrain + allowance (all ellipsoidal)
+    const vSurfaceElip = vTerrain + block.maxHeight;
+    const c = llToCamRel(lat, lon, vSurfaceElip);
     flat2D.push(c.x, c.z);
     pos3D.push(c.x, c.y, c.z);
   }
@@ -651,14 +739,14 @@ function createBlockMesh(block) {
     kind: 'block',
     name: `${block.name} ${block.designator}`,
     maxHeight: block.maxHeight,
-    terrainMSL: block.terrainMSL,
-    surfaceMSL: block.surfaceMSL
+    terrainElip: block.terrainElip,
+    surfaceElip: block.surfaceElip
   };
   const outPts = [];
   for (let i = 0; i < lastIdx; i++) {
     const [lon, lat] = ring[i];
     let vTerrain = sampleDTM(lat, lon);
-    if (vTerrain === null) vTerrain = block.terrainMSL;
+    if (vTerrain === null) vTerrain = block.terrainElip;
     const c = llToCamRel(lat, lon, vTerrain + block.maxHeight);
     outPts.push(new THREE.Vector3(c.x, c.y, c.z));
   }
@@ -671,7 +759,7 @@ function createBlockMesh(block) {
 }
 
 function createLabelSprite(block) {
-  const c = llToCamRel(block.centroidLat, block.centroidLon, block.surfaceMSL);
+  const c = llToCamRel(block.centroidLat, block.centroidLon, block.surfaceElip);
   const canvas = document.createElement('canvas');
   canvas.width = 128; canvas.height = 64;
   const ctx = canvas.getContext('2d');
@@ -721,10 +809,10 @@ function renderTerrain() {
   const py1 = Math.min(height - 1, Math.ceil((bbox.north - minLat) / (bbox.north - bbox.south) * (height - 1)));
   const cols = px1 - px0 + 1;
   const rows = py1 - py0 + 1;
-  showLog(`Terrain: ${cols}x${rows}`);
+  showLog(`Terrain: ${cols}×${rows}`);
   if (cols < 2 || rows < 2) return;
   if (cols * rows > 50000) {
-    showLog(`Terrain too large`, true);
+    showLog('Terrain too large', true);
     return;
   }
   const positions = [];
@@ -737,7 +825,7 @@ function renderTerrain() {
       const lon = bbox.west + (x / (width - 1)) * (bbox.east - bbox.west);
       const lat = bbox.north - (y / (height - 1)) * (bbox.north - bbox.south);
       let alt = dtmData[y * width + x];
-      if (alt === dtmHeader.nodata) alt = userGroundMSL;
+      if (alt === dtmHeader.nodata) alt = userGroundElip;
       const c = llToCamRel(lat, lon, alt);
       positions.push(c.x, c.y, c.z);
       const eleNorm = Math.max(0, Math.min(1, (alt - 0) / 200));
@@ -772,43 +860,25 @@ function renderTerrain() {
     color: 0xffffff, wireframe: true, transparent: true, opacity: 0.18
   });
   terrainMesh.add(new THREE.Mesh(geom, wireMat));
-  showLog(`Terrain rendered`);
+  showLog('Terrain rendered');
 }
 
 // ============================================================
-// SNAP terrain to feet — auto compute groundOffset
+// SNAP terrain to feet
 // ============================================================
 function snapTerrainToFeet() {
-  // Goal: make the terrain at user's exact position appear at feet (Y = -1.6)
-  // Currently terrain at user is at Y = userGroundMSL - userEyeMSL = -1.6
-  //   (because eye = ground + 1.6)
-  // After applying worldGroup.position.y = -groundOffset:
-  //   visible Y = -1.6 - groundOffset
-  // We want visible Y = -1.6 → groundOffset = 0
-  //
-  // BUT if terrain mesh values around user are different from userGroundMSL (because the
-  // 3x3 mean was off, or the cell at user has different value), then terrain "near user"
-  // appears at the wrong height.
-  //
-  // SNAP: re-sample DTM at exact user position and recompute eye level
   if (!dtmData || !anchorPos) {
-    showLog('SNAP: no DTM', true);
+    showLog('SNAP: ไม่มี DTM', true);
     return;
   }
   const dtmAt = sampleDTM(anchorPos.lat, anchorPos.lon);
   if (dtmAt === null) {
-    showLog('SNAP: nodata at user', true);
+    showLog('SNAP: nodata ที่ตำแหน่ง user', true);
     return;
   }
-  showLog(`SNAP: DTM at user = ${dtmAt.toFixed(2)}m`);
-  showLog(`  current ground = ${userGroundMSL.toFixed(2)}m`);
-  // The terrain mesh near user position renders at:
-  //   Y = dtmAt - userEyeMSL = dtmAt - (userGroundMSL + 1.6)
-  // We want this to be -1.6 (at feet level)
-  //   dtmAt - userGroundMSL - 1.6 = -1.6 - groundOffset
-  //   groundOffset = userGroundMSL - dtmAt
-  // This pulls the world down by the bias.
-  const newOffset = userGroundMSL - dtmAt;
+  showLog(`SNAP: DTM ณ user = ${dtmAt.toFixed(2)}m`);
+  showLog(`  ground ปัจจุบัน = ${userGroundElip.toFixed(2)}m`);
+  const newOffset = userGroundElip - dtmAt;
   groundOffset = newOffset;
   document.getElementById('ground-slider').value = groundOffset;
   document.getElementById('ground-val').textContent = groundOffset.toFixed(1);
@@ -819,48 +889,61 @@ function snapTerrainToFeet() {
 // Layer toggles
 // ============================================================
 function toggleLayer(name) {
-  if (name === 'ols') {
-    showOLS = !showOLS;
-    surfaceMeshes.forEach(m => m.visible = showOLS);
-    document.getElementById('btn-ols').classList.toggle('off', !showOLS);
-  } else if (name === 'terrain') {
-    showTerrain = !showTerrain;
-    if (terrainMesh) terrainMesh.visible = showTerrain;
-    document.getElementById('btn-ter').classList.toggle('off', !showTerrain);
-  } else if (name === 'blocks') {
-    showBlocks = !showBlocks;
+  const toggleMap = {
+    ols:     { flag: 'showOLS',     meshes: () => olsMeshes,  btn: 'btn-ols' },
+    ocs:     { flag: 'showOCS',     meshes: () => ocsMeshes,  btn: 'btn-ocs' },
+    terrain: { flag: 'showTerrain', meshes: () => terrainMesh ? [terrainMesh] : [], btn: 'btn-ter' },
+    blocks:  { flag: 'showBlocks',  meshes: () => blockMeshes, btn: 'btn-blk' },
+    labels:  { flag: 'showLabels',  meshes: () => labelSprites, btn: 'btn-lbl' }
+  };
+  const t = toggleMap[name];
+  if (!t) return;
+
+  // Toggle the flag
+  if (name === 'ols') { showOLS = !showOLS; }
+  else if (name === 'ocs') { showOCS = !showOCS; }
+  else if (name === 'terrain') { showTerrain = !showTerrain; }
+  else if (name === 'blocks') { showBlocks = !showBlocks; }
+  else if (name === 'labels') { showLabels = !showLabels; }
+
+  // Apply visibility
+  if (name === 'labels' || name === 'blocks') {
     blockMeshes.forEach(m => m.visible = showBlocks);
     labelSprites.forEach(s => s.visible = showBlocks && showLabels);
     document.getElementById('btn-blk').classList.toggle('off', !showBlocks);
-  } else if (name === 'labels') {
-    showLabels = !showLabels;
-    labelSprites.forEach(s => s.visible = showBlocks && showLabels);
     document.getElementById('btn-lbl').classList.toggle('off', !showLabels);
+  } else {
+    t.meshes().forEach(m => m.visible = window[t.flag]);
+    document.getElementById(t.btn).classList.toggle('off', !window[t.flag]);
   }
-  showLog(`Layer ${name}: ${eval('show' + name.charAt(0).toUpperCase() + name.slice(1)) ? 'on' : 'off'}`);
 }
 
 // ============================================================
-// Status loop
+// Status loop — shows key info for pre-survey
 // ============================================================
 function startStatusLoop() {
   setInterval(() => {
     if (!userPos) return;
     const accClass = userPos.acc < 5 ? 'good' : userPos.acc < 15 ? 'warn' : 'bad';
+    const gpsAltStr = userPos.alt != null ? `${userPos.alt.toFixed(1)}m` : '—';
+    const dtmStr = userGroundElip != null ? `${userGroundElip.toFixed(1)}m` : '—';
+    const eyeStr = userEyeElip != null ? `${userEyeElip.toFixed(1)}m` : '—';
+
     let html = `
-      <div class="row"><span class="label">Pos</span><span>${userPos.lat.toFixed(5)}, ${userPos.lon.toFixed(5)}</span></div>
-      <div class="row"><span class="label">Acc</span><span class="${accClass}">±${userPos.acc.toFixed(0)}m</span></div>
-      <div class="row"><span class="label">Hdg</span><span>${userHeading.toFixed(0)}° (off ${headingOffset.toFixed(0)}°)</span></div>
-      <div class="row"><span class="label">Ground MSL</span><span>${userGroundMSL ? userGroundMSL.toFixed(1) + 'm' : '-'}</span></div>
+      <div class="row"><span class="label">Pos</span><span>${userPos.lat.toFixed(6)}, ${userPos.lon.toFixed(6)}</span></div>
+      <div class="row"><span class="label">GPS acc</span><span class="${accClass}">±${userPos.acc.toFixed(0)}m</span></div>
+      <div class="row"><span class="label">Heading</span><span>${userHeading.toFixed(0)}° (off ${headingOffset.toFixed(0)}°)</span></div>
+      <div class="row"><span class="label">DTM พื้น (ellip)</span><span class="good">${dtmStr}</span></div>
+      <div class="row"><span class="label">GPS alt (ref)</span><span style="opacity:0.5">${gpsAltStr}</span></div>
+      <div class="row"><span class="label">ระดับตา (ellip)</span><span>${eyeStr}</span></div>
       <div class="row"><span class="label">G offset</span><span>${groundOffset.toFixed(1)}m</span></div>
-      <div class="row"><span class="label">Effective eye</span><span>${userEyeMSL ? (userEyeMSL + groundOffset).toFixed(1) + 'm' : '-'}</span></div>
     `;
     setStatus(html);
   }, 500);
 }
 
 // ============================================================
-// Aim info
+// Aim info — crosshair raycast with clearance data
 // ============================================================
 function startAimInfoLoop() {
   const aimEl = document.getElementById('aim-info');
@@ -870,13 +953,16 @@ function startAimInfoLoop() {
     raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
     raycaster.far = 50000;
 
-    const surfaceTargets = [];
-    const blockTargets = [];
-    const terrainTargets = [];
-    surfaceMeshes.forEach(m => {
+    const olsTargets = [], ocsTargets = [], blockTargets = [], terrainTargets = [];
+    olsMeshes.forEach(m => {
       if (!m.visible) return;
-      surfaceTargets.push(m);
-      m.children.forEach(c => { if (c.type === 'Mesh') surfaceTargets.push(c); });
+      olsTargets.push(m);
+      m.children.forEach(c => { if (c.type === 'Mesh') olsTargets.push(c); });
+    });
+    ocsMeshes.forEach(m => {
+      if (!m.visible) return;
+      ocsTargets.push(m);
+      m.children.forEach(c => { if (c.type === 'Mesh') ocsTargets.push(c); });
     });
     blockMeshes.forEach(m => { if (m.visible) blockTargets.push(m); });
     if (terrainMesh && terrainMesh.visible) {
@@ -884,56 +970,69 @@ function startAimInfoLoop() {
       terrainMesh.children.forEach(c => { if (c.type === 'Mesh') terrainTargets.push(c); });
     }
 
-    const eyeMSL = userEyeMSL + groundOffset;
     let lines = [];
 
-    const sHits = raycaster.intersectObjects(surfaceTargets, false);
-    if (sHits.length > 0) {
-      const h = sHits[0];
-      // h.point is in WORLD coordinates (after worldGroup transform)
-      // To get MSL we need to undo the worldGroup translation
-      // worldGroup.position.y = -groundOffset
-      // So local Y = world Y - (-groundOffset) = world Y + groundOffset
-      // And MSL = local Y + userEyeMSL
-      const surfMSL = h.point.y + groundOffset + userEyeMSL;
-      const obj = h.object.userData?.kind === 'surface' ? h.object : h.object.parent;
-      const name = (obj?.userData?.name || 'Surface').substring(0, 20);
+    // OLS hit
+    const olsHits = raycaster.intersectObjects(olsTargets, false);
+    if (olsHits.length > 0) {
+      const h = olsHits[0];
+      const surfElip = h.point.y + groundOffset + userEyeElip;
+      const clearanceFromGround = surfElip - userGroundElip;
+      const obj = h.object.userData?.kind === 'ols' ? h.object : h.object.parent;
+      const name = (obj?.userData?.name || 'OLS Surface').substring(0, 20);
       lines.push(`OLS: ${name}`);
-      lines.push(`  ${h.distance.toFixed(0)}m  ${surfMSL.toFixed(0)}m MSL`);
+      lines.push(`  ${h.distance.toFixed(0)}m  ${surfElip.toFixed(0)}m ellip`);
+      lines.push(`  clearance: ${clearanceFromGround.toFixed(0)}m above ground`);
     }
 
+    // OCS hit
+    const ocsHits = raycaster.intersectObjects(ocsTargets, false);
+    if (ocsHits.length > 0) {
+      const h = ocsHits[0];
+      const surfElip = h.point.y + groundOffset + userEyeElip;
+      const clearanceFromGround = surfElip - userGroundElip;
+      const obj = h.object.userData?.kind === 'ocs' ? h.object : h.object.parent;
+      const name = (obj?.userData?.name || 'OCS Surface').substring(0, 20);
+      lines.push(`─────────`);
+      lines.push(`OCS: ${name}`);
+      lines.push(`  ${h.distance.toFixed(0)}m  ${surfElip.toFixed(0)}m ellip`);
+      lines.push(`  clearance: ${clearanceFromGround.toFixed(0)}m above ground`);
+    }
+
+    // Block hit
     const bHits = raycaster.intersectObjects(blockTargets, false);
     if (bHits.length > 0) {
       const h = bHits[0];
       const ud = h.object.userData;
       lines.push(`─────────`);
       lines.push(`BLK: ${ud.name}`);
-      lines.push(`  Max H: ${ud.maxHeight}m`);
-      lines.push(`  Surf:  ${ud.surfaceMSL.toFixed(0)}m MSL`);
-      lines.push(`  Ter:   ${ud.terrainMSL.toFixed(0)}m MSL`);
+      lines.push(`  allow: ${ud.maxHeight}m above DTM`);
+      lines.push(`  top:   ${ud.surfaceElip.toFixed(0)}m ellip`);
+      lines.push(`  DTM:   ${ud.terrainElip.toFixed(0)}m ellip`);
     }
 
+    // Terrain hit
     const tHits = raycaster.intersectObjects(terrainTargets, false);
     if (tHits.length > 0) {
       const h = tHits[0];
-      const terMSL = h.point.y + groundOffset + userEyeMSL;
+      const terElip = h.point.y + groundOffset + userEyeElip;
       lines.push(`─────────`);
-      lines.push(`Terrain: ${terMSL.toFixed(0)}m MSL`);
-      lines.push(`  ${h.distance.toFixed(0)}m`);
+      lines.push(`DTM: ${terElip.toFixed(0)}m ellip  ${h.distance.toFixed(0)}m`);
     }
 
-    aimEl.textContent = lines.length > 0 ? lines.join('\n') : '— ไม่ได้เล็งอะไร —';
+    aimEl.textContent = lines.length > 0 ? lines.join('\n') : '— ไม่ได้เล็ง surface —';
   }, 200);
 }
 
 // ============================================================
-// Mini-map
+// Minimap
 // ============================================================
 function startMinimapLoop() {
   const canvas = document.getElementById('minimap');
   if (!canvas) return;
   const ctx = canvas.getContext('2d');
   const W = canvas.width, H = canvas.height;
+
   function draw() {
     if (!anchorPos) { requestAnimationFrame(draw); return; }
     ctx.fillStyle = 'rgba(0,0,0,0.7)';
@@ -941,6 +1040,8 @@ function startMinimapLoop() {
     const cx = W/2, cy = H/2;
     const margin = 10;
     const scale = (Math.min(W, H)/2 - margin) / renderRadius;
+
+    // Grid circles
     ctx.strokeStyle = 'rgba(74, 222, 128, 0.3)';
     ctx.lineWidth = 1;
     for (let r = 1000; r <= renderRadius; r += 1000) {
@@ -948,6 +1049,8 @@ function startMinimapLoop() {
       ctx.arc(cx, cy, r * scale, 0, Math.PI * 2);
       ctx.stroke();
     }
+
+    // Compass
     ctx.fillStyle = '#4ade80';
     ctx.font = 'bold 11px sans-serif';
     ctx.textAlign = 'center';
@@ -955,30 +1058,41 @@ function startMinimapLoop() {
     ctx.fillText('S', cx, H - 4);
     ctx.fillText('E', W - 8, cy + 4);
     ctx.fillText('W', 8, cy + 4);
+
     const headingRad = (userHeading - headingOffset) * Math.PI / 180;
-    allFeaturesEnu.forEach(p => {
-      const colorHex = '#' + p.color.toString(16).padStart(6, '0');
-      ctx.strokeStyle = colorHex;
-      ctx.fillStyle = colorHex + '40';
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      const ring = p.rings[0];
-      ring.forEach(([lon, lat, alt], i) => {
-        const c = llToCamRel(lat, lon, alt || 0);
-        const rx = c.x * Math.cos(-headingRad) - (-c.z) * Math.sin(-headingRad);
-        const ry = c.x * Math.sin(-headingRad) + (-c.z) * Math.cos(-headingRad);
-        const px = cx + rx * scale;
-        const py = cy - ry * scale;
-        if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+
+    function drawFeatures(features) {
+      features.forEach(p => {
+        const colorHex = '#' + p.color.toString(16).padStart(6, '0');
+        ctx.strokeStyle = colorHex;
+        ctx.fillStyle = colorHex + '40';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        const ring = p.rings[0];
+        ring.forEach(([lon, lat, alt], i) => {
+          const c = llToCamRel(lat, lon, alt || 0);
+          const rx = c.x * Math.cos(-headingRad) - (-c.z) * Math.sin(-headingRad);
+          const ry = c.x * Math.sin(-headingRad) + (-c.z) * Math.cos(-headingRad);
+          const px = cx + rx * scale;
+          const py = cy - ry * scale;
+          if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+        });
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
       });
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
-    });
+    }
+
+    drawFeatures(allOlsFeatures);
+    drawFeatures(allOcsFeatures);
+
+    // User dot
     ctx.fillStyle = '#ffffff';
     ctx.beginPath();
     ctx.arc(cx, cy, 4, 0, Math.PI * 2);
     ctx.fill();
+
+    // North arrow
     ctx.strokeStyle = '#ffffff';
     ctx.lineWidth = 2;
     ctx.beginPath();
@@ -990,6 +1104,7 @@ function startMinimapLoop() {
     ctx.lineTo(cx, cy - 12);
     ctx.lineTo(cx + 4, cy - 8);
     ctx.stroke();
+
     requestAnimationFrame(draw);
   }
   draw();
